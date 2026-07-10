@@ -18,10 +18,15 @@ describe("obo: token_cache (unit)", function()
           local entry = cache_store[key]
           if entry then return entry.value end
           local value, err, ttl = cb(...)
-          if value ~= nil then
-            cache_store[key] = { value = value, ttl = ttl }
+          -- 実 mlcache の契約を忠実に模倣する:
+          --   コールバックが (nil, err) を返した場合 → 何もキャッシュせずエラーを伝搬
+          --   コールバックが (nil, nil) を返した場合 → nil が負キャッシュされる
+          -- これにより「失敗を負キャッシュしない」要件の回帰をこのモックで検出できる
+          if err ~= nil then
+            return nil, err
           end
-          return value, err
+          cache_store[key] = { value = value, ttl = ttl }
+          return value
         end,
         invalidate = function(_, key) cache_store[key] = nil end,
       },
