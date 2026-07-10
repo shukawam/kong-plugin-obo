@@ -16,3 +16,4 @@ luacov.report.html
 
 # docs/ はローカル専用（仕様書・設計書・実装計画を保持、コミットしない）
 docs/
+.superpowers/
