@@ -38,5 +38,6 @@ build = {
     ["kong.plugins."..plugin_name..".client_assertion"] = "kong/plugins/"..plugin_name.."/client_assertion.lua",
     ["kong.plugins."..plugin_name..".jwt_validator"] = "kong/plugins/"..plugin_name.."/jwt_validator.lua",
     ["kong.plugins."..plugin_name..".token_exchange"] = "kong/plugins/"..plugin_name.."/token_exchange.lua",
+    ["kong.plugins."..plugin_name..".token_cache"] = "kong/plugins/"..plugin_name.."/token_cache.lua",
   }
 }
