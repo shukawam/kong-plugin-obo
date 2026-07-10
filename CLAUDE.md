@@ -60,7 +60,7 @@ kong/plugins/obo/
 ```bash
 pongo up                          # 依存コンテナ（Postgres）起動
 pongo run                         # 全テスト実行
-pongo run spec/obo/02-jwt-validator_spec.lua   # 単一 spec 実行（TDD ループはこれ）
+pongo run spec/obo/04-jwt-validator_spec.lua   # 単一 spec 実行（TDD ループはこれ）
 pongo lint                        # luacheck 実行
 pongo down                        # コンテナ停止
 ```
