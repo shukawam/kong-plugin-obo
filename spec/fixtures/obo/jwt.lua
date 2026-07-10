@@ -31,7 +31,12 @@ function M.make(claims_override, header_override)
 
   local header = { alg = "RS256", typ = "JWT", kid = keys.kid }
   for k, v in pairs(header_override or {}) do
-    header[k] = v
+    -- false を渡すとそのキーを削除する（例: kid = false で「kid なし」の異常系トークンを作る）
+    if v == false then
+      header[k] = nil
+    else
+      header[k] = v
+    end
   end
 
   -- JWT は base64url(header) . base64url(payload) . base64url(署名) の 3 部構成
