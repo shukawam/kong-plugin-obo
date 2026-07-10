@@ -13,7 +13,69 @@ local schema = {
     { config = {
         type = "record",
         fields = {
-          -- 設定フィールドは Task 2 で追加する
+          -- Entra ID のテナント ID（GUID）。トークンエンドポイントと issuer の導出に使う
+          { tenant_id = { type = "string", required = true } },
+
+          -- middle-tier（このゲートウェイ）として登録したアプリのクライアント ID
+          { client_id = { type = "string", required = true } },
+
+          -- Entra ID へのクライアント認証方式（docs/obo/02, 04 参照）
+          { client_auth_method = { type = "string", required = true,
+              default = "client_secret",
+              one_of = { "client_secret", "private_key_jwt" } } },
+
+          -- client_secret 方式のシークレット。
+          -- referenceable: Vault 参照（{vault://...}）を許可
+          -- encrypted: Kong EE ではデータベース上で暗号化される（OSS では無視されるが害はない）
+          { client_secret = { type = "string", referenceable = true, encrypted = true } },
+
+          -- private_key_jwt 方式の署名用秘密鍵（PEM 形式）
+          { private_key = { type = "string", referenceable = true, encrypted = true } },
+
+          -- 証明書 DER の SHA-256 サムプリント（Base64url）。client assertion の x5t#S256 ヘッダーに入れる
+          { certificate_thumbprint = { type = "string" } },
+
+          -- 交換後トークンに要求するスコープ（スペース区切りで scope パラメータに連結される）
+          -- 注意: .default と他の委任スコープの併用は AADSTS70011 になる（docs/obo/06）
+          { scopes = { type = "array", required = true,
+              elements = { type = "string" }, len_min = 1 } },
+
+          -- 受信トークンの aud クレームの期待値（= このアプリの client_id など）
+          { audience = { type = "string", required = true } },
+
+          -- 受信トークンの iss の期待値。省略時は identity_base_url と tenant_id から導出
+          { issuer = { type = "string" } },
+
+          -- Entra ID のベース URL。通常は変更不要（統合テストではモック IdP に向ける）
+          { identity_base_url = typedefs.url { required = true,
+              default = "https://login.microsoftonline.com" } },
+
+          -- 交換済みトークンをキャッシュするか
+          { token_cache_enabled = { type = "boolean", required = true, default = true } },
+
+          -- キャッシュ TTL を expires_in から何秒差し引くか（期限ギリギリのトークンを使わないための余裕）
+          { cache_ttl_margin = { type = "integer", required = true, default = 30, gt = -1 } },
+
+          -- Entra ID への HTTP タイムアウト（ミリ秒）
+          { http_timeout = { type = "integer", required = true, default = 10000, gt = 0 } },
+
+          -- Entra ID への接続で TLS 証明書を検証するか（本番では必ず true）
+          { ssl_verify = { type = "boolean", required = true, default = true } },
+        },
+        entity_checks = {
+          -- 認証方式に応じた条件付き必須チェック
+          { conditional = {
+              if_field = "client_auth_method", if_match = { eq = "client_secret" },
+              then_field = "client_secret", then_match = { required = true },
+          } },
+          { conditional = {
+              if_field = "client_auth_method", if_match = { eq = "private_key_jwt" },
+              then_field = "private_key", then_match = { required = true },
+          } },
+          { conditional = {
+              if_field = "client_auth_method", if_match = { eq = "private_key_jwt" },
+              then_field = "certificate_thumbprint", then_match = { required = true },
+          } },
         },
       },
     },
