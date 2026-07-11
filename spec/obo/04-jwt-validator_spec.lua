@@ -165,4 +165,43 @@ describe("obo: jwt_validator (unit)", function()
       cjson.encode({ issuer = "x" })
     assert.is_nil(jwt_validator.validate(conf, jwt.make()))
   end)
+
+  -- 設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のエラーマッピングでは
+  -- 「受信 JWT の検証失敗（署名・iss・aud・exp）→ 401」と「Entra ID への接続失敗 / 5xx → 502」を
+  -- 区別している。JWKS の取得は Entra ID への接続そのものなので、取得に失敗した場合は
+  -- 「トークンが不正」（401 相当）ではなく「IdP に接続できない」（502 相当）として
+  -- 呼び出し元（handler）が区別できる必要がある。この区別のための第 3 戻り値を検証する。
+  it("IdP に接続できない場合は upstream（IdP 到達不能）エラーとして返す（3 番目の戻り値）", function()
+    http_responses = {}  -- 全 URL で connection refused
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
+  end)
+
+  it("openid-configuration が不正な形（jwks_uri 欠落）でも upstream エラーとして返す", function()
+    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
+      cjson.encode({ issuer = "x" })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
+  end)
+
+  it("JWKS に存在しない kid（IdP 自体は正常応答）は upstream エラーにしない（401 のまま）", function()
+    local token = jwt.make(nil, { kid = "unknown-key" })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, token)
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_falsy(is_upstream_error)
+  end)
+
+  it("署名が不正なトークンは upstream エラーにしない（401 のまま）", function()
+    local token = jwt.make()
+    local h, p, s = token:match("^([^.]+)%.([^.]+)%.([^.]+)$")
+    local tampered = h .. "." .. p:sub(1, -2) .. (p:sub(-1) == "A" and "B" or "A") .. "." .. s
+    local claims, _, is_upstream_error = jwt_validator.validate(conf, tampered)
+    assert.is_nil(claims)
+    assert.is_falsy(is_upstream_error)
+  end)
 end)

@@ -110,12 +110,19 @@ end
 
 -- kid に対応する JWK(JSON文字列) を返すローカル関数
 -- 見つからない場合はキャッシュを破棄して 1 回だけ再取得する（鍵ロールオーバー対応）
+-- @return jwk_json, err, is_upstream_error
+--   is_upstream_error が true の場合、失敗理由は「受信トークンが不正」ではなく
+--   「Entra ID（OpenID configuration / JWKS）に接続できない、または応答が不正な形」であることを示す。
+--   設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のマッピングで
+--   「受信 JWT の検証失敗 → 401」と「Entra ID への接続失敗 / 5xx → 502」を区別するために使う。
 local function get_jwk_for_kid(conf, kid)
   local cache_key = jwks_cache_key(conf)
 
   local by_kid, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
   if not by_kid then
-    return nil, tostring(err)
+    -- load_jwks の失敗は常に Entra ID への接続・応答形式の問題であり、
+    -- 受信トークン自体の不正ではない
+    return nil, tostring(err), true
   end
   if by_kid[kid] then
     return by_kid[kid]
@@ -125,18 +132,24 @@ local function get_jwk_for_kid(conf, kid)
   kong.cache:invalidate(cache_key)
   by_kid, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
   if not by_kid then
-    return nil, tostring(err)
+    return nil, tostring(err), true
   end
   if by_kid[kid] then
     return by_kid[kid]
   end
+  -- IdP には正常に接続できたが、この kid の鍵が存在しない
+  -- （鍵ロールオーバーに追従できていない、または不正な kid を送ってきた）
   return nil, "no key found in JWKS for kid"
 end
 
 -- 受信アクセストークンを検証する（このモジュールの唯一の公開関数）
 -- @param conf プラグイン設定
 -- @param token JWT 文字列
--- @return 検証済みクレームのテーブル。失敗時は nil とエラー理由（内部ログ専用。レスポンスに出さない）
+-- @return 検証済みクレームのテーブル。
+--         失敗時は nil, エラー理由（内部ログ専用。レスポンスに出さない）, is_upstream_error。
+--         is_upstream_error が truthy の場合、原因は受信トークンではなく Entra ID への
+--         接続失敗・応答異常。呼び出し元（handler）はこれを 401 ではなく 502 として扱うべき
+--         （docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）。
 function M.validate(conf, token)
   local jwt, err = decode_jwt(token)
   if not jwt then
@@ -152,9 +165,9 @@ function M.validate(conf, token)
     return nil, "kid missing in JWT header"
   end
 
-  local jwk_json, key_err = get_jwk_for_kid(conf, jwt.header.kid)
+  local jwk_json, key_err, key_upstream = get_jwk_for_kid(conf, jwt.header.kid)
   if not jwk_json then
-    return nil, key_err
+    return nil, key_err, key_upstream
   end
 
   local pk, pkey_err = pkey.new(jwk_json, { format = "JWK" })

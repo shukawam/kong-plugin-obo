@@ -118,6 +118,15 @@ describe("obo: handler (unit)", function()
     assert.equal(502, exited.status)
   end)
 
+  it("受信トークンの検証が IdP 接続失敗（JWKS 取得不可）で失敗した場合も 502", function()
+    -- jwt_validator.validate の 3 番目の戻り値が truthy な場合は
+    -- 「トークンが不正」（401）ではなく「IdP に到達できない」（502）
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_validate = function() return nil, "request to .../jwks failed: connection refused", true end
+    handler:access(conf)
+    assert.equal(502, exited.status)
+  end)
+
   it("想定外のエラーは 500", function()
     request_headers["Authorization"] = "Bearer valid-token"
     mock_cache_get = function() return nil, { status = 500, error = "cache_failure" } end

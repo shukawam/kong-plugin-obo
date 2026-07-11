@@ -1,0 +1,187 @@
+# This is a custom nginx configuration template for Kong specs
+
+pid pids/nginx.pid; # mandatory even for custom config templates
+
+> if wasm and wasm_dynamic_module then
+load_module $(wasm_dynamic_module);
+> end
+
+error_log ${{PROXY_ERROR_LOG}} ${{LOG_LEVEL}};
+
+# injected nginx_main_* directives
+> for _, el in ipairs(nginx_main_directives) do
+$(el.name) $(el.value);
+> end
+
+> if database == "off" then
+lmdb_environment_path ${{LMDB_ENVIRONMENT_PATH}};
+lmdb_map_size         ${{LMDB_MAP_SIZE}};
+
+> if lmdb_validation_tag then
+lmdb_validation_tag   $(lmdb_validation_tag);
+> end
+
+> end
+
+events {
+    # injected nginx_events_* directives
+> for _, el in ipairs(nginx_events_directives) do
+    $(el.name) $(el.value);
+> end
+}
+
+> if wasm then
+wasm {
+> for _, el in ipairs(nginx_wasm_main_shm_kv_directives) do
+  shm_kv $(el.name) $(el.value);
+> end
+
+> for _, module in ipairs(wasm_modules_parsed) do
+  module $(module.name) $(module.path);
+> end
+
+> for _, el in ipairs(nginx_wasm_main_directives) do
+> if el.name == "shm_kv" then
+  shm_kv * $(el.value);
+> else
+  $(el.name) $(el.value);
+> end
+> end
+
+> if #nginx_wasm_wasmtime_directives > 0 or wasmtime_cache_config_file then
+  wasmtime {
+> if wasmtime_cache_config_file then
+    cache_config $(quote(wasmtime_cache_config_file));
+> end
+
+> for _, el in ipairs(nginx_wasm_wasmtime_directives) do
+    flag $(el.name) $(el.value);
+> end
+  }
+> end -- wasmtime
+
+> if #nginx_wasm_v8_directives > 0 then
+  v8 {
+> for _, el in ipairs(nginx_wasm_v8_directives) do
+    flag $(el.name) $(el.value);
+> end
+  }
+> end -- v8
+
+> if #nginx_wasm_wasmer_directives > 0 then
+  wasmer {
+> for _, el in ipairs(nginx_wasm_wasmer_directives) do
+    flag $(el.name) $(el.value);
+> end
+  }
+> end -- wasmer
+
+}
+> end
+
+
+
+> if role == "control_plane" or #proxy_listeners > 0 or #admin_listeners > 0 or #status_listeners > 0 then
+http {
+  include 'nginx-kong.conf';
+  include '*http.test.conf';
+
+  # 統合テスト（spec/obo/10-integration_spec.lua）専用の追加設定。
+  # モック IdP の呼び出し回数カウンタ用の共有辞書。
+  # ngx.shared.kong が使えない構成でも確実に動くよう専用 dict を用意する（task-9-brief 注意書き）。
+  lua_shared_dict kong_mock_idp_counter 1m;
+
+  # ============================================================
+  # モック Entra ID（統合テスト用）
+  # docs/obo/02, 03, 05 のエンドポイント形式・レスポンス形式を模倣する。
+  # プラグインの identity_base_url を http://127.0.0.1:10999 に向けて使う
+  # ============================================================
+  server {
+      listen 127.0.0.1:10999;
+
+      # 呼び出し回数カウンタ（キャッシュ検証用）。テストから GET /_calls で読める
+      location = /_calls {
+          content_by_lua_block {
+              local dict = ngx.shared.kong_mock_idp_counter
+              ngx.say(dict:get("obo_token_calls") or 0)
+          }
+      }
+
+      # OpenID configuration（docs/obo/05 のメタデータ例に準拠）
+      location ~ ^/([^/]+)/v2\.0/\.well-known/openid-configuration$ {
+          content_by_lua_block {
+              local tenant = ngx.var[1]
+              ngx.header["Content-Type"] = "application/json"
+              ngx.say(string.format(
+                '{"token_endpoint":"http://127.0.0.1:10999/%s/oauth2/v2.0/token",' ..
+                '"jwks_uri":"http://127.0.0.1:10999/%s/discovery/v2.0/keys"}',
+                tenant, tenant))
+          }
+      }
+
+      # JWKS: テスト用公開鍵を返す（spec/fixtures/obo/keys.lua と同じ鍵）
+      location ~ ^/[^/]+/discovery/v2\.0/keys$ {
+          content_by_lua_block {
+              local cjson = require "cjson.safe"
+              -- `nginx-kong.conf` が既に lua_package_path を宣言しているため、
+              -- 同じ nginx ディレクティブを二重に定義できない（"duplicate" エラーになる）。
+              -- そこでこの Lua ブロック内で package.path を拡張し、
+              -- コンテナ内でリポジトリがマウントされている /kong-plugin を検索対象に加える。
+              package.path = "/kong-plugin/?.lua;/kong-plugin/?/init.lua;" .. package.path
+              local keys = require "spec.fixtures.obo.keys"
+              ngx.header["Content-Type"] = "application/json"
+              ngx.say(cjson.encode({ keys = { keys.jwk() } }))
+          }
+      }
+
+      # トークンエンドポイント: OBO リクエストを検証して成功/エラー JSON を返す
+      location ~ ^/[^/]+/oauth2/v2\.0/token$ {
+          content_by_lua_block {
+              local cjson = require "cjson.safe"
+              ngx.req.read_body()
+              local args = ngx.req.get_post_args()
+
+              -- 呼び出し回数を記録（キャッシュヒットの検証に使う）
+              local dict = ngx.shared.kong_mock_idp_counter
+              dict:incr("obo_token_calls", 1, 0)
+
+              ngx.header["Content-Type"] = "application/json"
+
+              -- docs/obo/02 の必須パラメータが揃っているか検証する
+              if args.grant_type ~= "urn:ietf:params:oauth:grant-type:jwt-bearer"
+                 or args.requested_token_use ~= "on_behalf_of"
+                 or not args.assertion or not args.client_id or not args.scope
+                 or not (args.client_secret or args.client_assertion) then
+                ngx.status = 400
+                ngx.say('{"error":"invalid_request","error_description":"missing parameter"}')
+                return
+              end
+
+              -- assertion の中身で挙動を分岐（テストシナリオ用）
+              -- ペイロードに scenario=idp_error を含むトークンならエラーを返す
+              local payload_b64 = args.assertion:match("^[^.]+%.([^.]+)%.")
+              local payload = payload_b64 and cjson.decode(
+                ngx.decode_base64(payload_b64:gsub("-", "+"):gsub("_", "/")
+                  .. string.rep("=", (4 - #payload_b64 % 4) % 4)) ) or {}
+              if payload.scenario == "idp_error" then
+                ngx.status = 400
+                ngx.say('{"error":"interaction_required","error_description":"AADSTS50079: test",'
+                  .. '"claims":"{\\"access_token\\":{}}"}')
+                return
+              end
+
+              -- 成功レスポンス（docs/obo/03 の形式）
+              ngx.say('{"token_type":"Bearer","scope":"' .. args.scope
+                .. '","expires_in":3600,"access_token":"mock-exchanged-token"}')
+          }
+      }
+  }
+}
+> end
+
+> if #stream_listeners > 0 or cluster_ssl_tunnel then
+stream {
+  include 'nginx-kong-stream.conf';
+  include '*stream.test.conf';
+}
+> end

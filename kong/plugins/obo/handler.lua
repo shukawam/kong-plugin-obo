@@ -56,8 +56,15 @@ function plugin:access(conf)
   end
 
   -- ② 受信トークンの検証
-  local claims, validate_err = jwt_validator.validate(conf, token)
+  local claims, validate_err, validate_upstream_err = jwt_validator.validate(conf, token)
   if not claims then
+    if validate_upstream_err then
+      -- 受信トークンではなく Entra ID（OpenID configuration / JWKS）への接続・応答が
+      -- 原因の失敗。「トークンが不正」（401）ではなく「IdP に到達できない」（502）として扱う
+      -- （docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）
+      kong.log.debug("obo: jwt validation failed due to upstream error: ", validate_err)
+      return kong.response.exit(502, { message = "Bad Gateway" })
+    end
     return unauthorized(validate_err, 'Bearer error="invalid_token"')
   end
 
