@@ -27,6 +27,16 @@ local function extract_bearer_token()
   return auth:match("^[Bb][Ee][Aa][Rr][Ee][Rr]%s+(%S+)%s*$")
 end
 
+-- WWW-Authenticate ヘッダーに埋め込むエラー識別子を無害化するローカル関数
+-- IdP のレスポンス由来の値をそのまま埋め込むとヘッダーインジェクションの恐れがあるため、
+-- OAuth のエラーコードに現れる文字（英数字と - _ .）だけを許可し、それ以外は既定値に落とす
+local function sanitize_error_code(value)
+  if type(value) ~= "string" or value == "" or value:find("[^%w%-%_%.]") then
+    return "invalid_token"
+  end
+  return value
+end
+
 -- 401 を返す共通処理
 -- 内部的な失敗理由はレスポンスに含めず debug ログにのみ出す（情報漏えい防止）
 -- @param reason 内部ログ用の理由
@@ -64,7 +74,7 @@ function plugin:access(conf)
     if err.status == 401 then
       -- Entra のエラーとクレームチャレンジは WWW-Authenticate で伝搬する（docs/obo/03）。
       -- claims は JSON（引用符を含む）なので Base64 にしてから載せる
-      local www = 'Bearer error="' .. (err.error or "invalid_token") .. '"'
+      local www = 'Bearer error="' .. sanitize_error_code(err.error) .. '"'
       if err.claims then
         www = www .. ', claims="' .. ngx.encode_base64(err.claims) .. '"'
       end

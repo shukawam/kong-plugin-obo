@@ -100,6 +100,17 @@ describe("obo: handler (unit)", function()
     assert.is_truthy(www:find("claims=", 1, true))  -- クレームチャレンジの伝搬（docs/obo/03）
   end)
 
+  it("IdP エラー識別子に不正な文字が含まれる場合はサニタイズされる", function()
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_cache_get = function() return nil, { status = 401, error = 'evil", realm="pwned' } end
+    handler:access(conf)
+    assert.equal(401, exited.status)
+    local www = exited.headers["WWW-Authenticate"]
+    -- 不正な文字を含む識別子はそのまま埋め込まれない
+    assert.is_nil(www:find('realm="pwned', 1, true))
+    assert.is_truthy(www:find('error="invalid_token"', 1, true))
+  end)
+
   it("IdP に接続できなければ 502", function()
     request_headers["Authorization"] = "Bearer valid-token"
     mock_cache_get = function() return nil, { status = 502, error = "idp_unreachable" } end
