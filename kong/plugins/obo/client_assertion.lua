@@ -7,9 +7,20 @@
 local pkey  = require "resty.openssl.pkey"
 local cjson = require "cjson.safe"
 local util  = require "kong.plugins.obo.util"
-local utils = require "kong.tools.utils"  -- uuid() を使う（Kong 同梱）
 
 local M = {}
+
+-- uuid の取得: Kong 3.5+ では kong.tools.uuid、それ以前は kong.tools.utils にある。
+-- kong.tools.utils は非推奨のため、新モジュールを優先して両対応にする
+local uuid
+do
+  local ok, mod = pcall(require, "kong.tools.uuid")
+  if ok and type(mod) == "table" and mod.uuid then
+    uuid = mod.uuid
+  else
+    uuid = require("kong.tools.utils").uuid
+  end
+end
 
 -- assertion の有効期間（秒）。公式推奨「nbf の 5〜10 分後まで」に収める
 local ASSERTION_LIFETIME = 300
@@ -32,7 +43,7 @@ function M.build(conf, token_endpoint)
     aud = token_endpoint,
     iss = conf.client_id,
     sub = conf.client_id,  -- 自己発行のため iss と同一（docs/obo/04, RFC 7523）
-    jti = utils.uuid(),    -- リプレイ防止のため毎回一意な値にする
+    jti = uuid(),          -- リプレイ防止のため毎回一意な値にする
     nbf = now,
     iat = now,
     exp = now + ASSERTION_LIFETIME,
