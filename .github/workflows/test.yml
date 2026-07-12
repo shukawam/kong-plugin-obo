@@ -8,7 +8,7 @@ on:
   pull_request: {}
   push:
     branches:
-    - master
+    - main
   schedule:
   # every day at midnight, to test against non-pinned versions in the matrix
   - cron: '0 0 * * *'
@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         kongVersion:
-        - "3.4.x"
+        - "3.9.x"
         - "stable"
 
     steps:
