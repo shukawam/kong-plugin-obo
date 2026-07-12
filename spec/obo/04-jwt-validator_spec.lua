@@ -204,4 +204,48 @@ describe("obo: jwt_validator (unit)", function()
     assert.is_nil(claims)
     assert.is_falsy(is_upstream_error)
   end)
+
+  -- kid は一致するが、JWKS 上の当該エントリ自体が壊れている（n/e が不正等）ケース。
+  -- これは受信トークンの不正ではなく Entra ID 側データの異常なので、他の JWKS 取得失敗と
+  -- 同様に upstream エラー（3 番目の戻り値 true → 502）として扱うべき
+  it("kid が一致する JWK が壊れている場合は upstream エラーとして返す（3 番目の戻り値）", function()
+    http_responses["https://mock-idp.example/test-tenant/discovery/v2.0/keys"].body =
+      cjson.encode({ keys = { { kty = "RSA", kid = keys.kid, n = "!!!", e = "!!!" } } })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
+  end)
+
+  -- Fix 1: 未知 kid による JWKS 再取得のデバウンス。
+  -- kong.cache のモックは素通し（毎回コールバック実行）のため、実キャッシュの有無に関わらず
+  -- 「無効化 + 再取得」のもう一往復が抑止されることを HTTP 呼び出し回数の差分で検証する。
+  -- last_refetch はモジュール state なので、他テストの影響を受けないよう describe 内で
+  -- 都度モジュールを再 require してリセットする
+  describe("未知 kid の再取得デバウンス", function()
+    before_each(function()
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    it("同一ワーカー内で連続する未知 kid は 2 回目の再取得（無効化+再取得）を抑止する", function()
+      local token = jwt.make(nil, { kid = "unknown-key" })
+
+      local claims1, err1 = jwt_validator.validate(conf, token)
+      assert.is_nil(claims1)
+      assert.is_string(err1)
+      local calls_after_first = http_call_count
+
+      local claims2, err2 = jwt_validator.validate(conf, token)
+      assert.is_nil(claims2)
+      assert.is_string(err2)
+      local calls_after_second = http_call_count
+
+      -- kong.cache モックは素通し（毎回コールバック実行）なので、1 回の validate で
+      -- 「通常の取得」と「無効化後の再取得」の 2 往復（openid-config + jwks 各 2 回）= 4 回になる。
+      -- デバウンスされていれば 2 回目は「通常の取得」の 2 回だけで、再取得の 2 回は発生しない。
+      assert.equal(4, calls_after_first)
+      assert.equal(2, calls_after_second - calls_after_first)
+    end)
+  end)
 end)

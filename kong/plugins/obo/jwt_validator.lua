@@ -20,6 +20,12 @@ local CLOCK_SKEW = 60
 -- 公式推奨の「鍵更新チェックは 24 時間ごとが妥当」より十分短くしてある（docs/obo/05）
 local METADATA_TTL = 3600
 
+-- 未知 kid による JWKS 再取得の頻度を制限するための、ワーカー単位の最終再取得時刻
+-- （認証不要リクエストでキャッシュ無効化を連打される DoS を防ぐ。docs/obo/05 の
+--   「未知 kid は再取得」という挙動自体は維持し、頻度だけを制限する）
+local JWKS_REFETCH_INTERVAL = 30  -- 秒
+local last_refetch = {}  -- jwks_cache_key -> ngx.time() of last refetch
+
 -- JWT 文字列を分解して header / payload / signature を取り出すローカル関数
 -- @return { header, payload, signature, signing_input } のテーブル。不正なら nil とエラー
 local function decode_jwt(token)
@@ -128,6 +134,16 @@ local function get_jwk_for_kid(conf, kid)
     return by_kid[kid]
   end
 
+  -- 未知 kid での無効化+再取得はワーカー単位で頻度制限する。
+  -- 認証不要でここまで到達できるため、制限なしだと乱数 kid を送り続けるだけで
+  -- 共有キャッシュ（cluster 全体）への無効化を連打できてしまう
+  local now = ngx.time()
+  local last = last_refetch[cache_key]
+  if last and (now - last) < JWKS_REFETCH_INTERVAL then
+    return nil, "no key found in JWKS for kid (refetch suppressed)"
+  end
+  last_refetch[cache_key] = now
+
   -- キャッシュが古い可能性があるので、無効化して取り直す
   kong.cache:invalidate(cache_key)
   by_kid, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
@@ -170,9 +186,11 @@ function M.validate(conf, token)
     return nil, key_err, key_upstream
   end
 
+  -- kid は一致したが JWK 自体が壊れている（n/e が不正等）場合、受信トークンではなく
+  -- Entra ID 側データの異常なので、他の JWKS 取得失敗と同様に upstream エラーとして扱う
   local pk, pkey_err = pkey.new(jwk_json, { format = "JWK" })
   if not pk then
-    return nil, "failed to load JWK: " .. tostring(pkey_err)
+    return nil, "failed to load JWK: " .. tostring(pkey_err), true
   end
 
   -- RS256 署名検証（SHA-256 + PKCS#1 v1.5 は lua-resty-openssl の既定パディング）

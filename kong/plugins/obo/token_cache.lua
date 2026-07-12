@@ -17,9 +17,12 @@ end
 
 -- キャッシュキーを作るローカル関数
 -- 生のトークンをキーにしない（共有メモリに平文トークンを並べないため）。
--- client_id と scopes もキーに含め、設定変更後に古いトークンを引かないようにする
+-- client_id と scopes に加えてテナント（tenant_id / identity_base_url）もキーに含め、
+-- 同一トークン・client_id・scopes でもテナントが異なれば別キャッシュになるようにする
+-- （テナントをまたいだ交換済みトークンの誤ヒットを防ぐ）
 local function cache_key(conf, incoming_token)
   local material = incoming_token .. "|" .. conf.client_id .. "|" .. table.concat(conf.scopes, " ")
+      .. "|" .. tostring(conf.tenant_id) .. "|" .. tostring(conf.identity_base_url)
   return "obo:token:" .. sha256_hex(material)
 end
 

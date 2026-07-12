@@ -47,6 +47,8 @@ describe("obo: token_cache (unit)", function()
       cache_ttl_margin = 30,
       client_id = "client-a",
       scopes = { "api://x/.default" },
+      tenant_id = "tenant-a",
+      identity_base_url = "https://mock-idp.example",
     }
   end)
 
@@ -75,6 +77,28 @@ describe("obo: token_cache (unit)", function()
   it("受信トークンが違えば別キャッシュになる", function()
     token_cache.get(conf, "incoming-1", ok_exchange("t1", 3600))
     token_cache.get(conf, "incoming-2", ok_exchange("t2", 3600))
+    assert.equal(2, exchange_calls)
+  end)
+
+  -- tenant_id をキー材料に含めないと、同じ受信トークン・client_id・scopes で
+  -- テナントだけが違う設定を使い回した場合に別テナント向けの交換済みトークンを誤って
+  -- キャッシュヒットさせてしまう危険がある
+  it("tenant_id が違えば別キャッシュになる（同一トークン・client_id・scopes でも）", function()
+    token_cache.get(conf, "incoming", ok_exchange("t-tenant-a", 3600))
+    local other_conf = {}
+    for k, v in pairs(conf) do other_conf[k] = v end
+    other_conf.tenant_id = "tenant-b"
+    token_cache.get(other_conf, "incoming", ok_exchange("t-tenant-b", 3600))
+    assert.equal(2, exchange_calls)
+  end)
+
+  -- identity_base_url（テナントを識別する IdP のベース URL）が違う場合も同様に別キャッシュとする
+  it("identity_base_url が違えば別キャッシュになる（同一トークン・client_id・scopes でも）", function()
+    token_cache.get(conf, "incoming", ok_exchange("t-idp-a", 3600))
+    local other_conf = {}
+    for k, v in pairs(conf) do other_conf[k] = v end
+    other_conf.identity_base_url = "https://other-idp.example"
+    token_cache.get(other_conf, "incoming", ok_exchange("t-idp-b", 3600))
     assert.equal(2, exchange_calls)
   end)
 
