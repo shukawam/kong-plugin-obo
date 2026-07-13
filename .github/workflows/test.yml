@@ -20,9 +20,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kongVersion:
-        - "3.9.x"
-        - "stable"
+        include:
+        - kongVersion: "3.9.x"
+          pongoArgs: ""
+        - kongVersion: "stable"
+          pongoArgs: ""
+        # 本番 DP（Dockerfile）と同系の Kong Gateway 3.14 系。
+        # バージョンは Dockerfile の `kong/kong-gateway:3.14.0.7` に合わせて固定する。
+        # 注意: strategy=off（dbless）のテストは、Kong 3.14 同梱の spec.helpers が
+        # `kong config db_export` の実行に失敗するため除外する（プラグイン側の不具合ではない。
+        # dbless 起動そのものの検証は下の smoke-kong-3-14 ジョブで別途行う）。
+        - kongVersion: "3.14.0.7"
+          pongoArgs: "--exclude-tags=off"
 
     steps:
     # サプライチェーン攻撃対策としてアクションはコミット SHA で固定する（コメントは対応するバージョン）
@@ -37,10 +46,12 @@ jobs:
 
     - uses: Kong/kong-pongo-action@8a531d3257a52d64473bd2e1dccb0bc958f3f8f0 # v1.0.2
       with:
-        pongo_version: master
+        # kong-pongo のバージョンをタグ 2.27.0 のコミット SHA に固定する
+        # （master 追従だと非固定参照になり、サプライチェーン対策の方針と不整合になるため）
+        pongo_version: 39cb70a1e331640cd2f6fb80c30a4aeca14867d1 # 2.27.0
         kong_version: ${{ matrix.kongVersion }}
 
-    - run: pongo run -- --Xoutput "--color" --coverage
+    - run: pongo run -- --Xoutput "--color" --coverage ${{ matrix.pongoArgs }}
 
 
 
@@ -71,3 +82,107 @@ jobs:
         fi
       env:
         COVERALLS_REPO_TOKEN: ${{ github.token }}
+
+  # 本番 DP は KONG_DATABASE=off（dbless）の data_plane として動く（compose.yaml 参照）。
+  # 上の `test` ジョブの 3.14.0.7 は strategy=off を除外しているため、
+  # 本番と同じ起動形態（Dockerfile ビルド + dbless + plugins=obo）を別途スモーク検証する。
+  smoke-kong-3-14:
+    name: "Kong 3.14 dbless 起動スモーク（本番 DP 同系）"
+    runs-on: ubuntu-latest
+
+    steps:
+    # サプライチェーン攻撃対策としてアクションはコミット SHA で固定する（コメントは対応するバージョン）
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      # login to docker to prevent hitting rate-limits etc
+      with:
+        username: ${{ secrets.GHA_DOCKERHUB_PULL_USER }}
+        password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUBLIC_TOKEN }}
+
+    - name: obo プラグイン入り DP イメージをビルドする（Dockerfile と同じ手順）
+      run: docker build -t kong-plugin-obo:smoke .
+
+    - name: 最小構成の宣言的設定（declarative config）を用意する
+      run: |
+        cat > /tmp/kong-smoke.yml <<'EOF'
+        _format_version: "3.0"
+        services:
+          - name: smoke-service
+            url: http://127.0.0.1:65535
+            routes:
+              - name: smoke-route
+                paths:
+                  - /smoke
+                protocols:
+                  - http
+            plugins:
+              - name: obo
+                config:
+                  tenant_id: smoke-tenant
+                  client_id: smoke-client
+                  client_secret: smoke-secret
+                  scopes:
+                    - "api://smoke/.default"
+                  audience: smoke-client
+        EOF
+
+    - name: Kong を dbless（本番 DP と同じ database=off）で起動する
+      run: |
+        docker run -d --name kong-smoke \
+          -e KONG_DATABASE=off \
+          -e KONG_DECLARATIVE_CONFIG=/tmp/kong-smoke.yml \
+          -e KONG_PLUGINS=bundled,obo \
+          -e KONG_ADMIN_LISTEN='0.0.0.0:8001' \
+          -e KONG_PROXY_LISTEN='0.0.0.0:8000' \
+          -v /tmp/kong-smoke.yml:/tmp/kong-smoke.yml:ro \
+          -p 8001:8001 \
+          -p 8000:8000 \
+          kong-plugin-obo:smoke
+
+    - name: Kong の起動と obo プラグインのロードを確認する
+      run: |
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:8001/status > /dev/null; then
+            echo "Kong is up"
+            break
+          fi
+          if [ "$i" -eq 30 ]; then
+            echo "::error::Kong did not become ready in time"
+            docker logs kong-smoke
+            exit 1
+          fi
+          sleep 2
+        done
+
+        # obo プラグインが available_on_server に載っていること（ロード成功の確認）
+        curl -sf http://localhost:8001/ | grep -q '"obo"' || {
+          echo "::error::obo plugin is not listed as available on the server"
+          docker logs kong-smoke
+          exit 1
+        }
+
+        # 宣言的設定の route が実際に読み込まれていること
+        curl -sf http://localhost:8001/routes/smoke-route > /dev/null || {
+          echo "::error::smoke-route was not loaded from the declarative config"
+          docker logs kong-smoke
+          exit 1
+        }
+
+        # プロキシ経由でアクセスし、obo の access フェーズが実際に実行されることを確認する
+        # （Authorization ヘッダーなしのため、handler.lua の実装どおり 401 が返るはず）
+        status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/smoke)
+        if [ "$status" != "401" ]; then
+          echo "::error::expected 401 from obo plugin (missing Authorization header) but got $status"
+          docker logs kong-smoke
+          exit 1
+        fi
+
+    - name: ログを出力する（デバッグ用）
+      if: always()
+      run: docker logs kong-smoke || true
+
+    - name: 後片付け
+      if: always()
+      run: docker rm -f kong-smoke || true
