@@ -1,0 +1,22 @@
+# ビルドコンテキストから開発用ファイルを除外する（COPY されるのは luarocks make に必要なものだけでよい）
+.git
+docs/
+spec/
+servroot*
+.pongo/
+.superpowers/
+.claude/
+*.rock
+.env
+examples/
+compose.yaml
+README.md
+CLAUDE.md
+LICENSE
+.github/
+.busted
+.luacheckrc
+.luacov
+.editorconfig
+.gitattributes
+.travis.yml.example
