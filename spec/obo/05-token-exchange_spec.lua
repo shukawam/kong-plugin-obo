@@ -255,16 +255,41 @@ describe("obo: token_exchange (unit)", function()
     assert.equal("5", err.retry_after)
   end)
 
+  it("HTTP 5xx でもボディが temporarily_unavailable なら status=503 + Retry-After", function()
+    -- Entra 自身が一時的サービス不可を返す最も典型的な形（HTTP 503 + エラー JSON）。
+    -- 有効な Entra エラー JSON はプロキシ由来ではなく Entra 自身の応答である証拠なので、
+    -- HTTP 5xx でも error 文字列の分類（503 + Retry-After 透過）を優先する
+    mock_res = {
+      status = 503,
+      headers = { ["Retry-After"] = "120" },
+      body = cjson.encode({ error = "temporarily_unavailable" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(503, err.status)
+    assert.equal("120", err.retry_after)
+  end)
+
   -- ------------------------------------------------------------------
   -- IdP 側の障害 → 502
   -- ------------------------------------------------------------------
 
-  it("HTTP 5xx は status=502（IdP 側障害）", function()
+  it("error フィールドのない HTTP 5xx は status=502（IdP 側障害）", function()
+    -- Entra のエラー JSON でない 5xx（ゲートウェイ/プロキシ由来など）は IdP 側障害として 502
     mock_res = {
       status = 503,
-      body = cjson.encode({ error = "temporarily_unavailable" }),
+      body = cjson.encode({ message = "upstream connect error" }),
     }
-    -- HTTP 5xx はレスポンスボディの error 文字列より優先して 502 に分類する
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(502, err.status)
+  end)
+
+  it("HTTP 5xx で error が temporarily_unavailable 以外なら status=502", function()
+    -- server_error 等の 5xx エラー JSON は IdP 側障害として 502。
+    -- 401（ユーザー起因）/ 500（設定起因）の分類は 4xx にのみ適用する
+    mock_res = {
+      status = 500,
+      body = cjson.encode({ error = "server_error" }),
+    }
     local _, err = token_exchange.exchange(conf, "t")
     assert.equal(502, err.status)
   end)

@@ -45,16 +45,13 @@ local CONFIG_ERROR = {
   invalid_request        = true,
 }
 
--- error 文字列を HTTP ステータスに分類するローカル関数。
+-- error 文字列を HTTP ステータスに分類するローカル関数（4xx のエラー JSON 専用）。
+-- temporarily_unavailable（→ 503）は HTTP ステータスに依らず exchange() 側で先に判定する。
 -- @param code Entra のエラー JSON の error 文字列
--- @return 401（ユーザー解決可能） / 503（一時的） / 500（設定・未知）
+-- @return 401（ユーザー解決可能） / 500（設定・未知）
 local function classify_error(code)
   if USER_RESOLVABLE[code] then
     return 401
-  end
-  -- RFC 6749 §4.1.2.1:「一時的な過負荷またはメンテナンス」。再試行で解消しうる → 503
-  if code == "temporarily_unavailable" then
-    return 503
   end
   if CONFIG_ERROR[code] then
     return 500
@@ -146,12 +143,26 @@ function M.exchange(conf, incoming_token)
     }
   end
 
-  -- HTTP 5xx: IdP 側の障害。ボディの error 文字列より優先して 502 に分類する
+  -- temporarily_unavailable: HTTP ステータス（4xx/5xx）に関係なく 503 + Retry-After。
+  -- Entra が一時的サービス不可を返す最も典型的な形は「HTTP 503 + エラー JSON」であり、
+  -- 有効な Entra エラー JSON はプロキシ由来ではなく Entra 自身の応答である証拠なので、
+  -- 下の一般的な 5xx → 502 分類より先に判定する（RFC 6749 §4.1.2.1: 一時的過負荷/メンテナンス）
+  if type(json) == "table" and json.error == "temporarily_unavailable" then
+    return nil, {
+      status = 503,
+      error = "temporarily_unavailable",
+      retry_after = safe_retry_after(res.headers),
+      detail = json.error_description,  -- 内部ログ専用。レスポンスに出さないこと
+    }
+  end
+
+  -- HTTP 5xx: IdP 側の障害。上記以外（error フィールドなし・server_error 等）は 502。
+  -- 401（ユーザー起因）/ 500（設定起因）の error 文字列分類は 4xx にのみ適用する
   if res.status >= 500 then
     return nil, { status = 502, error = "idp_error", detail = "status " .. res.status }
   end
 
-  -- Entra のエラー JSON（error フィールドあり）を許可リストで分類する（Issue #4）
+  -- Entra のエラー JSON（4xx + error フィールドあり）を許可リストで分類する（Issue #4）
   if type(json) == "table" and type(json.error) == "string" then
     local status = classify_error(json.error)
     local err = {
@@ -162,9 +173,6 @@ function M.exchange(conf, incoming_token)
     if status == 401 then
       -- クレームチャレンジは 401 の場合のみ handler が WWW-Authenticate に載せる（docs/obo/03）
       err.claims = type(json.claims) == "string" and json.claims or nil
-    elseif status == 503 then
-      -- temporarily_unavailable に Retry-After が付いていれば透過する
-      err.retry_after = safe_retry_after(res.headers)
     end
     return nil, err
   end
