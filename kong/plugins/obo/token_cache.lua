@@ -28,6 +28,44 @@ local M = {}
 -- resurrect_ttl に 0 ではなく極小の正の値 0.001 を使っているのに倣い、ここでも同じ値を使う。
 local RESURRECT_TTL = 0.001
 
+-- expires_in の上限（秒）。24 時間。
+-- IdP の異常応答で極端に大きい値（あるいは巨大な有限値）が返っても、
+-- 交換済みトークンが実質的に「ずっと消えないキャッシュ」にならないようにするための安全弁
+local MAX_EXPIRES_IN = 86400
+
+-- Entra からの expires_in を TTL 計算に使える安全な数値へ正規化するローカル関数
+-- 数値として解釈できない値（文字列以外の型・数値化できない文字列・欠落=nil）や
+-- NaN・無限大・負数は 0 として扱う（呼び出し元の math.max により下限 1 秒に落ちる = fail safe）。
+-- 有限の正の数値でも MAX_EXPIRES_IN を超える場合は上限にクランプする。
+-- @param expires_in 交換レスポンスの expires_in フィールド（型不定）
+-- @return 0 以上 MAX_EXPIRES_IN 以下の数値
+local function normalize_expires_in(expires_in)
+  local n = tonumber(expires_in)
+
+  -- tonumber が nil を返すのは「数値化できない文字列」「nil（欠落）」「テーブル等の非対応型」の場合
+  if n == nil then
+    return 0
+  end
+
+  -- NaN は IEEE754 の仕様上、自分自身と比較しても等しくならない（n ~= n が真になる）
+  -- この性質を利用して NaN 判定する（Lua には isnan のような専用関数がない）
+  if n ~= n then
+    return 0
+  end
+
+  -- 無限大（math.huge / -math.huge）や負数は異常値として 0 扱いにする
+  if n == math.huge or n == -math.huge or n < 0 then
+    return 0
+  end
+
+  -- 上限クランプ: 異常に大きい有限値で長期キャッシュ化しないようにする
+  if n > MAX_EXPIRES_IN then
+    return MAX_EXPIRES_IN
+  end
+
+  return n
+end
+
 -- SHA-256 の 16 進ダイジェストを返すローカル関数
 local function sha256_hex(s)
   local digest = resty_sha256:new()
@@ -75,7 +113,8 @@ function M.get(conf, incoming_token, exchange_fn)
       return nil, "exchange failed"
     end
     -- 第 3 戻り値が TTL になる（mlcache の仕様）。期限切れ間際を避けるため margin を引く
-    local ttl = math.max((tonumber(res.expires_in) or 0) - conf.cache_ttl_margin, 1)
+    -- expires_in は IdP からの値をそのまま信用せず、正規化・上限クランプしてから使う
+    local ttl = math.max(normalize_expires_in(res.expires_in) - conf.cache_ttl_margin, 1)
     return res.access_token, nil, ttl
   end)
 
