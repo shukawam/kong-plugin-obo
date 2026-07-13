@@ -110,47 +110,28 @@ export KONG_PLUGINS=bundled,obo
 
 ### 3.5 コンテナでの起動（Konnect データプレーン）
 
+> **ステップバイステップのガイドは [`docs/`](./docs/) にあります**:
+> [01 カスタムプラグイン登録](./docs/01-custom-plugin-registration.md) /
+> [02 Data Plane のビルドと起動](./docs/02-data-plane-build.md) /
+> [03 Entra ID のセットアップ](./docs/03-entra-id-setup.md) /
+> [04 OBO トークン交換の確認](./docs/04-obo-verification.md)
+
 リポジトリ同梱の `compose.yaml` は、obo プラグイン入りの Kong Gateway を
-**Konnect のデータプレーン (DP)** として起動する構成です。upstream ダミーの echo サービスと
-Observability スタック（otel-lgtm）も含みます。
+**Konnect のデータプレーン (DP)** として起動する構成です
+（Observability スタック otel-lgtm も含みます）。
 
-前提として、Konnect（コントロールプレーン側）に以下の準備が必要です:
+流れの概要（詳細は上記ガイド 01〜04）:
 
-1. **カスタムプラグインのスキーマ登録**: 登録しないと、CP から obo プラグインの設定を
-   DP に配信できない。方法はどちらでもよい:
-   - スクリプト（推奨）: `mise run schema:upload`（[`scripts/upload-plugin-schema.sh`](./scripts/upload-plugin-schema.sh)
-     が Konnect API 経由で登録・更新する。登録状態の確認だけなら `mise run schema:verify`）
-   - 手動: Gateway Manager → Plugins → New Plugin → Custom Plugins から
-     `kong/plugins/obo/schema.lua` をアップロードする
-2. **DP 接続情報**: Gateway Manager で DP を作成し、cluster 証明書ペアを
-   `cluster-certs/cluster.crt` / `cluster-certs/cluster.key` に配置する
-   （`cluster-certs/` は gitignore / dockerignore 済み。コミット・イメージ焼き込み禁止）。
+1. **カスタムプラグインのスキーマ登録**（ガイド 01）: `mise run schema:upload`
+2. **DP のビルドと起動**（ガイド 02）: cluster 証明書を `cluster-certs/` に配置し
+   `docker compose up --build`（`cluster-certs/` は gitignore / dockerignore 済み。
+   コミット・イメージ焼き込み禁止）
+3. **Entra ID のアプリ登録**（ガイド 03）
+4. **ゲートウェイ設定の同期と検証**（ガイド 04）: `mise run gateway:sync` →
+   device code flow でトークンを取得して確認
 
-起動手順:
-
-```bash
-# 1. 環境変数を用意する（PREFIX = Konnect の DP 接続プレフィックス）
-cp .env.example .env   # PREFIX と OBO_CLIENT_SECRET を記入
-
-# 2. ビルドして起動（Dockerfile が obo プラグインをインストールした DP イメージを作る）
-docker compose up --build
-```
-
-Konnect 側で Service（例: `http://echo:8080`）と Route を作り、obo プラグインを適用します。
-このとき `client_secret` には `{vault://env/obo-client-secret}` を指定すると、
-DP 上の環境変数 `OBO_CLIENT_SECRET`（`.env` から注入）で解決され、
-シークレットを Konnect 側に保存せずに済みます。
-
-検証: Entra ID からユーザーのアクセストークン（aud = middle-tier アプリ）を取得して
-
-```bash
-curl -H "Authorization: Bearer <token A>" http://localhost:8000/<route-path>
-```
-
-echo のレスポンス JSON の `headers.authorization` が受信トークンと**異なる値**
-（交換後の token B）になっていれば OBO 交換は成功です。トークンなしなら `401` +
-`WWW-Authenticate` が返ります。切り分けには `compose.yaml` の `KONG_LOG_LEVEL: debug`
-（設定済み）のログを `docker compose logs kong` で確認してください。
+切り分けには `compose.yaml` の `KONG_LOG_LEVEL: debug`（設定済み）のログを
+`docker compose logs kong | grep "obo:"` で確認してください。
 
 ## 4. 設定リファレンス
 

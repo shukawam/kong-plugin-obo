@@ -14,10 +14,6 @@ services:
     environment:
       # カスタムプラグイン obo をロードする（Konnect 側へのスキーマ登録も必要。README §3.5 参照）
       KONG_PLUGINS: bundled,obo
-      # obo プラグイン設定の {vault://env/...} 参照が DP 上で解決する際に使うシークレット
-      # （値は .env またはホストのシェルから渡す。compose.yaml に直書きしないこと）
-      OBO_CLIENT_SECRET: ${OBO_CLIENT_SECRET:-}
-      OBO_PRIVATE_KEY_PEM: ${OBO_PRIVATE_KEY_PEM:-}
       KONG_ROLE: data_plane
       KONG_DATABASE: off
       KONG_VITALS: off
@@ -50,17 +46,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # ============================================================
-  # OBO 検証用の upstream ダミー
-  # 受信リクエストをそのまま JSON で返すエコーサーバー。
-  # Konnect 側で Service の URL を http://echo:8080 にすると、
-  # レスポンスの headers.authorization で交換後トークン (token B) を確認できる
-  # ============================================================
-  echo:
-    <<: *default
-    container_name: echo
-    image: mendhak/http-https-echo:34
 
   # ============================================================
   # Observability

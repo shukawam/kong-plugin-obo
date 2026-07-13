@@ -14,8 +14,10 @@ luacov.report.html
 # exclude Pongo containerid file
 .containerid
 
-# docs/ はローカル専用（仕様書・設計書・実装計画を保持、コミットしない）
-docs/
+# ローカル専用の内部資料（仕様調査ノート・設計書・実装計画はコミットしない）
+# docs/ 直下のユーザーガイド（docs/*.md）はコミット対象
+docs/obo/
+docs/superpowers/
 .superpowers/
 
 # ローカル検証用の実値ファイル（example のみコミットする）

@@ -1,0 +1,24 @@
+_format_version: "3.0"
+
+services:
+  - name: httpbin-service
+    url: https://httpbin.konghq.com
+    routes:
+      - name: httpbin-route
+        paths:
+          - /mock
+        protocols:
+          - http
+          - https
+        methods:
+          - GET
+        strip_path: true
+    plugins:
+      - name: obo
+        config:
+          tenant_id: ${{ env "DECK_TENANT_ID" }}
+          client_id: ${{ env "DECK_CLIENT_ID" }}
+          client_secret: ${{ env "DECK_CLIENT_SECRET" }}
+          scopes:
+            - ${{ env "DECK_SCOPE" }}
+          audience: ${{ env "DECK_AUDIENCE" }}

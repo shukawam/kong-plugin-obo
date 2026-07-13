@@ -19,15 +19,18 @@ Microsoft Entra ID の On-Behalf-Of (OBO) フローを実現する Kong Gateway 
 4. **コメントは日本語で丁寧に書く。** Lua 初学者でも読めるように、各関数の目的・引数・戻り値、
    非自明な処理の理由をコメントする。Lua 特有のイディオム（`local` の意味、`pcall`、
    メタテーブル等）を使う箇所には一言説明を添える。
-5. **`docs/` はローカル専用**（.gitignore 済み）。コミットしないこと。
+5. **`docs/obo/` と `docs/superpowers/` はローカル専用**（.gitignore 済み）。コミットしないこと。
+   一方、`docs/` 直下のユーザーガイド（`docs/0X-*.md`）は**コミット対象**。
+   ガイドには失敗談や試行過程を書かず、手順を実現する最小限の内容のみを書く。
 
 ## ドキュメントの場所
 
 | パス | 内容 | Git 管理 |
 |---|---|---|
+| `docs/0X-*.md` | ユーザーガイド（プラグイン登録 / DP ビルド / Entra 設定 / OBO 検証） | コミット対象 |
 | `docs/obo/` | Entra ID OBO 仕様書（一次情報の裏取り済み） | ローカルのみ |
 | `docs/superpowers/specs/2026-07-10-obo-plugin-design.md` | 承認済み設計書 | ローカルのみ |
-| `docs/plans/` | 実装計画 | ローカルのみ |
+| `docs/superpowers/plans/` | 実装計画 | ローカルのみ |
 
 ## アーキテクチャ
 
