@@ -55,7 +55,10 @@ local schema = {
           -- 受信トークンの aud クレームの期待値（= このアプリの client_id など）
           { audience = { type = "string", required = true } },
 
-          -- 受信トークンの iss の期待値。省略時は identity_base_url と tenant_id から導出
+          -- OpenID メタデータの issuer に対する任意のピン（追加の防御）。
+          -- 設定時、メタデータの issuer がこの値と完全一致しない場合は拒否する（fail-close）。
+          -- 受信トークンの iss は常に「検証済みメタデータの issuer」と照合されるため、
+          -- この値で iss の期待値を別の値に差し替えることはできない
           { issuer = { type = "string" } },
 
           -- 受信トークンに要求する委任スコープ（scp クレーム）のリスト。

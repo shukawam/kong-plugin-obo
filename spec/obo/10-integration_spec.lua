@@ -8,12 +8,23 @@ local keys = require "spec.fixtures.obo.keys"
 
 local PLUGIN_NAME = "obo"
 local MOCK_IDP = "http://127.0.0.1:10999"
--- スキーマが tenant_id を GUID に限定するため、統合テストの設定も GUID を使う。
--- 受信トークンの iss（jwt.make の既定 = login.microsoftonline.com/.../v2.0）は
--- テスト固定値なので conf.issuer で明示的に合わせる（identity_base_url はモックに向ける）。
+-- スキーマの tenant_id 制約（GUID）に合わせる
 local TENANT_ID = "11111111-1111-1111-1111-111111111111"
 -- モック IdP のトークンエンドポイント（direct probe で使う）
 local MOCK_TOKEN_URL = MOCK_IDP .. "/" .. TENANT_ID .. "/oauth2/v2.0/token"
+-- モック IdP のメタデータが自己申告する issuer（{identity_base_url}/{tenant}/v2.0）。
+-- 受信トークンの iss は常にメタデータの issuer と完全一致を要求されるため、
+-- テストトークンの iss を既定でこれに合わせる
+local MOCK_ISSUER = MOCK_IDP .. "/" .. TENANT_ID .. "/v2.0"
+
+-- 既定でモックのメタデータ issuer に一致する iss を持つテスト JWT を作るローカル関数
+local function make_token(claims_override)
+  claims_override = claims_override or {}
+  if claims_override.iss == nil then
+    claims_override.iss = MOCK_ISSUER
+  end
+  return jwt.make(claims_override)
+end
 
 for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
   describe(PLUGIN_NAME .. ": (integration) [#" .. strategy .. "]", function()
@@ -33,8 +44,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
           audience = "test-client-id",
-          -- jwt.make() の既定 iss に合わせる
-          issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
+          -- issuer（ピン）は未設定: メタデータの issuer が唯一の期待値になる
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
         },
@@ -54,7 +64,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           certificate_thumbprint = "test-thumbprint",   -- x5t#S256 に入るダミー値
           scopes = { "api://downstream/.default" },
           audience = "test-client-id",
-          issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
+          -- issuer（ピン）は未設定: メタデータの issuer が唯一の期待値になる
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
         },
@@ -71,7 +81,6 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
           audience = "test-client-id",
-          issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
           identity_base_url = "http://127.0.0.1:10998",  -- モック IdP とは別の閉じたポート
           ssl_verify = false,
         },
@@ -88,7 +97,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
           audience = "test-client-id",
-          issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
+          -- issuer（ピン）は未設定: メタデータの issuer が唯一の期待値になる
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
           required_scopes = { "access_as_user" },
@@ -121,7 +130,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
 
     it("有効なトークン: Authorization が交換後トークンに差し替わり 200", function()
       local r = client:get("/request", {
-        headers = { host = "obo.example", authorization = "Bearer " .. jwt.make() },
+        headers = { host = "obo.example", authorization = "Bearer " .. make_token() },
       })
       assert.response(r).has.status(200)
       -- モックバックエンドにエコーされたリクエストヘッダーを検証する
@@ -134,7 +143,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
       -- client_secret 非同送）した上で 200 を返すため、この成功はアサーションが実際に
       -- 正しく組まれていることの e2e 証拠になる
       local r = client:get("/request", {
-        headers = { host = "obo-pkjwt.example", authorization = "Bearer " .. jwt.make() },
+        headers = { host = "obo-pkjwt.example", authorization = "Bearer " .. make_token() },
       })
       assert.response(r).has.status(200)
       local auth = assert.request(r).has.header("authorization")
@@ -236,7 +245,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
     end)
 
     it("署名が不正なトークン: 401", function()
-      local token = jwt.make()
+      local token = make_token()
       local tampered = token:sub(1, -3) .. "xx"  -- 署名部分を壊す
       local r = client:get("/request", {
         headers = { host = "obo.example", authorization = "Bearer " .. tampered },
@@ -247,7 +256,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
     it("aud 不一致のトークン: 401（IdP に送らずプラグインが拒否）", function()
       local r = client:get("/request", {
         headers = { host = "obo.example",
-                    authorization = "Bearer " .. jwt.make({ aud = "someone-else" }) },
+                    authorization = "Bearer " .. make_token({ aud = "someone-else" }) },
       })
       assert.response(r).has.status(401)
     end)
@@ -255,7 +264,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
     it("期限切れトークン: 401", function()
       local r = client:get("/request", {
         headers = { host = "obo.example",
-                    authorization = "Bearer " .. jwt.make({ exp = ngx.time() - 3600 }) },
+                    authorization = "Bearer " .. make_token({ exp = ngx.time() - 3600 }) },
       })
       assert.response(r).has.status(401)
     end)
@@ -264,7 +273,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
       -- モック IdP は scenario=idp_error クレームを持つ assertion にエラーを返す
       local r = client:get("/request", {
         headers = { host = "obo.example",
-                    authorization = "Bearer " .. jwt.make({ scenario = "idp_error" }) },
+                    authorization = "Bearer " .. make_token({ scenario = "idp_error" }) },
       })
       assert.response(r).has.status(401)
       local www = assert.response(r).has.header("WWW-Authenticate")
@@ -272,7 +281,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
     end)
 
     it("required_scopes を満たすトークン（scp 一致）: 200 で交換される", function()
-      local token = jwt.make({ scp = "access_as_user Mail.Read", sub = "scoped-ok-user" })
+      local token = make_token({ scp = "access_as_user Mail.Read", sub = "scoped-ok-user" })
       local r = client:get("/request", {
         headers = { host = "obo-scoped.example", authorization = "Bearer " .. token },
       })
@@ -289,7 +298,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
       -- sub を固有化する理由: token_cache のキーはトークン文字列由来のため、既定の
       -- jwt.make() だと同一秒に生成された先行テストのトークンと完全一致し、
       -- 「呼び出し回数が増えない」がキャッシュヒットで偶然成立してしまう可能性がある
-      local token = jwt.make({ sub = "scoped-denied-user" })
+      local token = make_token({ sub = "scoped-denied-user" })
       local http = require "resty.http"
       local function token_calls()
         local c = assert(http.new())
@@ -310,14 +319,14 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
 
     it("IdP に接続できない: 502", function()
       local r = client:get("/request", {
-        headers = { host = "obo-down.example", authorization = "Bearer " .. jwt.make() },
+        headers = { host = "obo-down.example", authorization = "Bearer " .. make_token() },
       })
       assert.response(r).has.status(502)
     end)
 
     it("同じトークンの 2 回目はキャッシュから返る（IdP の呼び出し回数が増えない）", function()
       -- sub を変えて他テストとキャッシュが混ざらないようにする
-      local token = jwt.make({ sub = "cache-test-user" })
+      local token = make_token({ sub = "cache-test-user" })
       local http = require "resty.http"
 
       -- 呼び出し回数カウンタを読むローカル関数

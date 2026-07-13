@@ -4,6 +4,14 @@
 
 local cjson = require "cjson.safe"
 
+-- モック IdP の定数。tenant_id はスキーマの制約（GUID またはドメイン名）に合わせる
+local MOCK_BASE   = "https://mock-idp.example"
+local TENANT      = "11111111-1111-1111-1111-111111111111"
+-- メタデータが自己申告する issuer（Entra の正規形 = {base}/{GUID}/v2.0）
+local MOCK_ISSUER = MOCK_BASE .. "/" .. TENANT .. "/v2.0"
+local CONFIG_URL  = MOCK_BASE .. "/" .. TENANT .. "/v2.0/.well-known/openid-configuration"
+local JWKS_URL    = MOCK_BASE .. "/" .. TENANT .. "/discovery/v2.0/keys"
+
 describe("obo: jwt_validator (unit)", function()
   local jwt_validator, jwt, keys
   local conf
@@ -56,58 +64,75 @@ describe("obo: jwt_validator (unit)", function()
     package.loaded["kong.plugins.obo.jwt_validator"] = nil
   end)
 
+  -- 既定でモックのメタデータ issuer と一致する iss を持つトークンを作るローカル関数。
+  -- 受信トークンの iss は常に「メタデータの issuer」と照合されるため、
+  -- 正常系トークンの iss は MOCK_ISSUER でなければならない
+  local function make(claims_override, header_override)
+    claims_override = claims_override or {}
+    if claims_override.iss == nil then
+      claims_override.iss = MOCK_ISSUER
+    end
+    return jwt.make(claims_override, header_override)
+  end
+
   before_each(function()
     http_call_count = 0
     conf = {
-      identity_base_url = "https://mock-idp.example",
-      tenant_id = "test-tenant",
+      identity_base_url = MOCK_BASE,
+      tenant_id = TENANT,
       audience = "test-client-id",
       http_timeout = 1000,
       ssl_verify = false,
-      -- issuer 省略 → identity_base_url と tenant_id から導出される
+      -- issuer（ピン）は未設定。メタデータの issuer が唯一の期待値になる
     }
     -- 正常な OpenID 設定と JWKS を返すモック（形式は docs/obo/05 のメタデータ例に準拠）。
     -- issuer は取得元 authority（{identity_base_url}/{tenant_id}/v2.0）と一致させる（OIDC Discovery）
     http_responses = {
-      ["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"] = {
+      [CONFIG_URL] = {
         status = 200,
         body = cjson.encode({
-          issuer = "https://mock-idp.example/test-tenant/v2.0",
-          jwks_uri = "https://mock-idp.example/test-tenant/discovery/v2.0/keys",
+          issuer = MOCK_ISSUER,
+          jwks_uri = JWKS_URL,
         }),
       },
-      ["https://mock-idp.example/test-tenant/discovery/v2.0/keys"] = {
+      [JWKS_URL] = {
         status = 200,
         body = cjson.encode({ keys = { keys.jwk() } }),
       },
     }
-    -- ※ jwt.make() の既定 iss は "https://login.microsoftonline.com/test-tenant/v2.0" なので
-    --   このテストでは iss を明示上書きするか conf.issuer を合わせる（下の各テスト参照）
-    conf.issuer = "https://login.microsoftonline.com/test-tenant/v2.0"
   end)
 
   it("有効なトークンを受け入れてクレームを返す", function()
-    local claims, err = jwt_validator.validate(conf, jwt.make())
+    local claims, err = jwt_validator.validate(conf, make())
     assert.is_nil(err)
     assert.equal("test-user", claims.sub)
   end)
 
-  it("issuer を省略すると identity_base_url と tenant_id から導出して検証する", function()
-    conf.issuer = nil
-    -- 導出値 https://mock-idp.example/test-tenant/v2.0 に一致する iss を持つトークン
-    local token = jwt.make({ iss = "https://mock-idp.example/test-tenant/v2.0" })
-    local claims = jwt_validator.validate(conf, token)
+  -- メタデータの issuer が受信トークンの iss の唯一の期待値であること。
+  -- conf.issuer はもはや「iss の期待値の上書き」ではなく「メタデータ issuer のピン」
+  it("conf.issuer がメタデータの issuer と一致する場合は受理する（ピン一致）", function()
+    conf.issuer = MOCK_ISSUER
+    local claims, err = jwt_validator.validate(conf, make())
+    assert.is_nil(err)
     assert.is_truthy(claims)
+  end)
+
+  it("conf.issuer がメタデータの issuer と一致しない場合は upstream エラーとして拒否する（ピン不一致）", function()
+    -- 別の issuer を期待値として設定しても、それが受信トークンの検証に使われてはならない。
+    -- メタデータとの不一致は設定または IdP の異常として fail-close する
+    conf.issuer = "https://login.microsoftonline.com/" .. TENANT .. "/v2.0"
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
   end)
 
   -- 受け入れ条件: 末尾スラッシュ付き identity_base_url でも issuer 導出・メタデータ URL が
   -- 正しくなる（util.build_tenant_url による正規化の end-to-end 確認）。
-  it("末尾スラッシュ付き identity_base_url でも issuer 導出・メタデータ URL が正しい", function()
-    conf.identity_base_url = "https://mock-idp.example/"  -- 末尾スラッシュ付き
-    conf.issuer = nil  -- 導出させる。正規化されず // になると iss/メタデータ取得が壊れる
+  it("末尾スラッシュ付き identity_base_url でも issuer 検証・メタデータ URL が正しい", function()
+    conf.identity_base_url = MOCK_BASE .. "/"  -- 末尾スラッシュ付き
     -- 正規化後の URL・issuer は末尾スラッシュなしと同一なので http_responses はそのまま通る
-    local token = jwt.make({ iss = "https://mock-idp.example/test-tenant/v2.0" })
-    local claims, err = jwt_validator.validate(conf, token)
+    local claims, err = jwt_validator.validate(conf, make())
     assert.is_nil(err)
     assert.is_truthy(claims)
   end)
@@ -116,11 +141,9 @@ describe("obo: jwt_validator (unit)", function()
   -- Entra の実メタデータは（大文字 GUID で要求しても）issuer 内の GUID を小文字で返すため、
   -- 導出値を大文字のまま比較すると metadata issuer 検証が常に失敗する。
   -- util.build_tenant_url の小文字正規化でこれを吸収する。
-  it("大文字の tenant_id でもメタデータ issuer 検証・iss 導出が小文字の正規形で通る", function()
-    conf.tenant_id = "TEST-TENANT"  -- モックの URL・issuer は小文字（Entra の正規形を模倣）
-    conf.issuer = nil               -- 導出させる
-    local token = jwt.make({ iss = "https://mock-idp.example/test-tenant/v2.0" })
-    local claims, err = jwt_validator.validate(conf, token)
+  it("大文字の tenant_id でもメタデータ issuer 検証が小文字の正規形で通る", function()
+    conf.tenant_id = TENANT:upper()  -- モックの URL・issuer は小文字（Entra の正規形を模倣）
+    local claims, err = jwt_validator.validate(conf, make())
     assert.is_nil(err)
     assert.is_truthy(claims)
   end)
@@ -134,7 +157,7 @@ describe("obo: jwt_validator (unit)", function()
   end)
 
   it("署名が改ざんされたトークンを拒否する", function()
-    local token = jwt.make()
+    local token = make()
     -- ペイロード部分の末尾 1 文字を書き換えて署名を無効化する
     local h, p, s = token:match("^([^.]+)%.([^.]+)%.([^.]+)$")
     local tampered = h .. "." .. p:sub(1, -2) .. (p:sub(-1) == "A" and "B" or "A") .. "." .. s
@@ -143,64 +166,61 @@ describe("obo: jwt_validator (unit)", function()
   end)
 
   it("alg が RS256 以外なら拒否する（alg confusion 対策）", function()
-    local token = jwt.make(nil, { alg = "none" })
+    local token = make(nil, { alg = "none" })
     local claims = jwt_validator.validate(conf, token)
     assert.is_nil(claims)
     -- HS256 も拒否（公開鍵を HMAC 鍵として使わせる攻撃の防止）
-    token = jwt.make(nil, { alg = "HS256" })
+    token = make(nil, { alg = "HS256" })
     assert.is_nil(jwt_validator.validate(conf, token))
   end)
 
   it("aud が一致しないトークンを拒否する（docs/obo/02: 他アプリ宛てトークンは拒否すべき）", function()
-    local token = jwt.make({ aud = "https://graph.microsoft.com" })
+    local token = make({ aud = "https://graph.microsoft.com" })
     local claims = jwt_validator.validate(conf, token)
     assert.is_nil(claims)
   end)
 
-  it("iss が一致しないトークンを拒否する", function()
-    local token = jwt.make({ iss = "https://evil.example/test-tenant/v2.0" })
+  it("iss がメタデータの issuer と一致しないトークンを拒否する", function()
+    local token = make({ iss = "https://evil.example/" .. TENANT .. "/v2.0" })
     assert.is_nil(jwt_validator.validate(conf, token))
   end)
 
   it("期限切れ（exp が過去）のトークンを拒否する", function()
-    local token = jwt.make({ exp = ngx.time() - 3600 })
+    local token = make({ exp = ngx.time() - 3600 })
     assert.is_nil(jwt_validator.validate(conf, token))
   end)
 
   it("nbf が未来のトークンを拒否する", function()
-    local token = jwt.make({ nbf = ngx.time() + 3600 })
+    local token = make({ nbf = ngx.time() + 3600 })
     assert.is_nil(jwt_validator.validate(conf, token))
   end)
 
   it("exp がない・数値でないトークンを拒否する（RFC 7523: exp は MUST）", function()
-    assert.is_nil(jwt_validator.validate(conf, jwt.make({ exp = "not-a-number" })))
+    assert.is_nil(jwt_validator.validate(conf, make({ exp = "not-a-number" })))
   end)
 
   it("kid がヘッダーにないトークンを拒否する", function()
-    local token = jwt.make(nil, { kid = false })  -- 下の注参照
-    -- 注: header_override で kid を消すには jwt.make 側で false を nil 扱いにするか、
-    -- ここで自前でヘッダーを組む。実装しやすい方で良いが「kid なし → 拒否」を必ず検証すること。
+    local token = make(nil, { kid = false })  -- jwt.make は false でヘッダーからキーを削除する
     local claims = jwt_validator.validate(conf, token)
     assert.is_nil(claims)
   end)
 
   it("JWKS に存在しない kid のトークンを拒否する（再取得を 1 回試みた上で）", function()
-    local token = jwt.make(nil, { kid = "unknown-key" })
+    local token = make(nil, { kid = "unknown-key" })
     local claims = jwt_validator.validate(conf, token)
     assert.is_nil(claims)
   end)
 
   it("IdP に接続できない場合はエラーを返す", function()
     http_responses = {}  -- 全 URL で connection refused
-    local claims, err = jwt_validator.validate(conf, jwt.make())
+    local claims, err = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
   end)
 
   it("openid-configuration に jwks_uri がない場合はエラーを返す", function()
-    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({ issuer = "https://mock-idp.example/test-tenant/v2.0" })
-    assert.is_nil(jwt_validator.validate(conf, jwt.make()))
+    http_responses[CONFIG_URL].body = cjson.encode({ issuer = MOCK_ISSUER })
+    assert.is_nil(jwt_validator.validate(conf, make()))
   end)
 
   -- 設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のエラーマッピングでは
@@ -210,16 +230,15 @@ describe("obo: jwt_validator (unit)", function()
   -- 呼び出し元（handler）が区別できる必要がある。この区別のための第 3 戻り値を検証する。
   it("IdP に接続できない場合は upstream（IdP 到達不能）エラーとして返す（3 番目の戻り値）", function()
     http_responses = {}  -- 全 URL で connection refused
-    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
     assert.is_truthy(is_upstream_error)
   end)
 
   it("openid-configuration が不正な形（jwks_uri 欠落）でも upstream エラーとして返す", function()
-    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({ issuer = "https://mock-idp.example/test-tenant/v2.0" })
-    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    http_responses[CONFIG_URL].body = cjson.encode({ issuer = MOCK_ISSUER })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
     assert.is_truthy(is_upstream_error)
@@ -228,12 +247,11 @@ describe("obo: jwt_validator (unit)", function()
   -- OIDC Discovery（openid-connect-discovery-1_0）: メタデータの issuer は取得元 authority と
   -- 完全一致しなければならない。一致しない場合は IdP 側メタデータの異常なので upstream エラー扱い。
   it("メタデータの issuer が期待値と一致しない場合は upstream エラーとして拒否する", function()
-    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({
-        issuer = "https://evil.example/test-tenant/v2.0",
-        jwks_uri = "https://mock-idp.example/test-tenant/discovery/v2.0/keys",
-      })
-    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    http_responses[CONFIG_URL].body = cjson.encode({
+      issuer = "https://evil.example/" .. TENANT .. "/v2.0",
+      jwks_uri = JWKS_URL,
+    })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
     assert.is_truthy(is_upstream_error)
@@ -242,17 +260,17 @@ describe("obo: jwt_validator (unit)", function()
   -- jwks_uri のホストが identity_base_url と異なると、署名鍵を攻撃者ホストから取得させられる。
   -- OIDC メタデータの整合性違反として upstream エラー扱いで拒否する。
   it("jwks_uri のホストが identity_base_url と異なる場合は upstream エラーとして拒否する", function()
-    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({
-        issuer = "https://mock-idp.example/test-tenant/v2.0",
-        jwks_uri = "https://evil.example/test-tenant/discovery/v2.0/keys",
-      })
+    local evil_jwks = "https://evil.example/" .. TENANT .. "/discovery/v2.0/keys"
+    http_responses[CONFIG_URL].body = cjson.encode({
+      issuer = MOCK_ISSUER,
+      jwks_uri = evil_jwks,
+    })
     -- 攻撃者ホストが正規の鍵で応答できても（署名検証自体は通る）ホスト不一致で拒否すること
-    http_responses["https://evil.example/test-tenant/discovery/v2.0/keys"] = {
+    http_responses[evil_jwks] = {
       status = 200,
       body = cjson.encode({ keys = { keys.jwk() } }),
     }
-    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
     assert.is_truthy(is_upstream_error)
@@ -260,24 +278,57 @@ describe("obo: jwt_validator (unit)", function()
 
   -- identity_base_url が https のときは jwks_uri も https を要求する（平文での鍵取得を防ぐ）。
   it("jwks_uri が https でない場合は upstream エラーとして拒否する（identity_base_url が https）", function()
-    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({
-        issuer = "https://mock-idp.example/test-tenant/v2.0",
-        jwks_uri = "http://mock-idp.example/test-tenant/discovery/v2.0/keys",
-      })
+    local plain_jwks = "http://mock-idp.example/" .. TENANT .. "/discovery/v2.0/keys"
+    http_responses[CONFIG_URL].body = cjson.encode({
+      issuer = MOCK_ISSUER,
+      jwks_uri = plain_jwks,
+    })
     -- 平文 http でも鍵取得自体は成功しうるが、scheme 検証で拒否すること
-    http_responses["http://mock-idp.example/test-tenant/discovery/v2.0/keys"] = {
+    http_responses[plain_jwks] = {
       status = 200,
       body = cjson.encode({ keys = { keys.jwk() } }),
     }
-    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
     assert.is_truthy(is_upstream_error)
   end)
 
+  -- 署名鍵の issuer 検証（docs/obo/05 "Validate the signing key issuer"）。
+  -- Entra の JWKS は鍵エントリに issuer フィールドを含むことがある（実 JWKS で確認済み。
+  -- 多くは "{tenantid}" プレースホルダ入り、一部は具体的な GUID）。存在する場合は
+  -- プレースホルダを実テナントに置換した上でメタデータの issuer と一致しない鍵を使わない。
+  it("JWKS の鍵に issuer があり不一致なら、その鍵を署名検証に使わない（401 のまま）", function()
+    local jwk = keys.jwk()
+    jwk.issuer = "https://evil.example/{tenantid}/v2.0"
+    http_responses[JWKS_URL].body = cjson.encode({ keys = { jwk } })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    -- IdP には正常接続できており、この鍵が使えないだけなので 401（upstream ではない）
+    assert.is_falsy(is_upstream_error)
+  end)
+
+  it("JWKS の鍵の issuer の {tenantid} プレースホルダを実テナントに置換して一致すれば受理する", function()
+    local jwk = keys.jwk()
+    jwk.issuer = MOCK_BASE .. "/{tenantid}/v2.0"
+    http_responses[JWKS_URL].body = cjson.encode({ keys = { jwk } })
+    local claims, err = jwt_validator.validate(conf, make())
+    assert.is_nil(err)
+    assert.is_truthy(claims)
+  end)
+
+  it("JWKS の鍵の issuer が具体値でメタデータ issuer と一致すれば受理する", function()
+    local jwk = keys.jwk()
+    jwk.issuer = MOCK_ISSUER
+    http_responses[JWKS_URL].body = cjson.encode({ keys = { jwk } })
+    local claims, err = jwt_validator.validate(conf, make())
+    assert.is_nil(err)
+    assert.is_truthy(claims)
+  end)
+
   it("JWKS に存在しない kid（IdP 自体は正常応答）は upstream エラーにしない（401 のまま）", function()
-    local token = jwt.make(nil, { kid = "unknown-key" })
+    local token = make(nil, { kid = "unknown-key" })
     local claims, err, is_upstream_error = jwt_validator.validate(conf, token)
     assert.is_nil(claims)
     assert.is_string(err)
@@ -285,7 +336,7 @@ describe("obo: jwt_validator (unit)", function()
   end)
 
   it("署名が不正なトークンは upstream エラーにしない（401 のまま）", function()
-    local token = jwt.make()
+    local token = make()
     local h, p, s = token:match("^([^.]+)%.([^.]+)%.([^.]+)$")
     local tampered = h .. "." .. p:sub(1, -2) .. (p:sub(-1) == "A" and "B" or "A") .. "." .. s
     local claims, _, is_upstream_error = jwt_validator.validate(conf, tampered)
@@ -297,9 +348,9 @@ describe("obo: jwt_validator (unit)", function()
   -- これは受信トークンの不正ではなく Entra ID 側データの異常なので、他の JWKS 取得失敗と
   -- 同様に upstream エラー（3 番目の戻り値 true → 502）として扱うべき
   it("kid が一致する JWK が壊れている場合は upstream エラーとして返す（3 番目の戻り値）", function()
-    http_responses["https://mock-idp.example/test-tenant/discovery/v2.0/keys"].body =
+    http_responses[JWKS_URL].body =
       cjson.encode({ keys = { { kty = "RSA", kid = keys.kid, n = "!!!", e = "!!!" } } })
-    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
     assert.is_truthy(is_upstream_error)
@@ -318,7 +369,7 @@ describe("obo: jwt_validator (unit)", function()
     end)
 
     it("同一ワーカー内で連続する未知 kid は 2 回目の再取得を抑止する", function()
-      local token = jwt.make(nil, { kid = "unknown-key" })
+      local token = make(nil, { kid = "unknown-key" })
 
       local claims1, err1 = jwt_validator.validate(conf, token)
       assert.is_nil(claims1)
@@ -406,7 +457,7 @@ describe("obo: jwt_validator (unit)", function()
       rotated_jwk.kid = new_kid
 
       local jwks_seq = 0
-      http_responses["https://mock-idp.example/test-tenant/discovery/v2.0/keys"] = function()
+      http_responses[JWKS_URL] = function()
         jwks_seq = jwks_seq + 1
         if jwks_seq == 1 then
           return { status = 200, body = cjson.encode({ keys = { keys.jwk() } }) }
@@ -414,7 +465,7 @@ describe("obo: jwt_validator (unit)", function()
         return { status = 200, body = cjson.encode({ keys = { keys.jwk(), rotated_jwk } }) }
       end
 
-      local token = jwt.make(nil, { kid = new_kid })
+      local token = make(nil, { kid = new_kid })
       local claims, err = jwt_validator.validate(conf, token)
 
       assert.is_nil(err)
@@ -426,14 +477,14 @@ describe("obo: jwt_validator (unit)", function()
 
       -- 置換後は新 kid がキャッシュ済みなので、以後の同 kid は再取得せずに検証できる
       local calls_before = http_call_count
-      local claims2 = jwt_validator.validate(conf, jwt.make(nil, { kid = new_kid }))
+      local claims2 = jwt_validator.validate(conf, make(nil, { kid = new_kid }))
       assert.is_truthy(claims2)
       assert.equal(0, http_call_count - calls_before)
     end)
 
     it("再取得が失敗しても既存の JWKS キャッシュを失わない（stale 温存）", function()
       -- まず正常なトークンで JWKS（旧鍵 test-key-1）をキャッシュに載せる
-      local ok_claims = jwt_validator.validate(conf, jwt.make())
+      local ok_claims = jwt_validator.validate(conf, make())
       assert.is_truthy(ok_claims)
       assert.equal(0, invalidate_count)
 
@@ -442,7 +493,7 @@ describe("obo: jwt_validator (unit)", function()
 
       -- 未知 kid のトークンは再取得を試みるが、IdP 断で失敗する
       local claims, err, is_upstream =
-        jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+        jwt_validator.validate(conf, make(nil, { kid = "test-key-2" }))
       assert.is_nil(claims)
       assert.is_string(err)
       -- IdP 到達不能は upstream エラー（502 相当）として返す
@@ -451,14 +502,14 @@ describe("obo: jwt_validator (unit)", function()
       assert.equal(0, invalidate_count)
 
       -- IdP は断のままでも、キャッシュ済みの旧鍵 test-key-1 のトークンは引き続き検証できる
-      local claims2, err2 = jwt_validator.validate(conf, jwt.make())
+      local claims2, err2 = jwt_validator.validate(conf, make())
       assert.is_nil(err2)
       assert.is_truthy(claims2)
     end)
 
     it("再投入（renew の書き込み）が失敗しても既存の JWKS キャッシュを失わない", function()
       -- まず正常なトークンで JWKS（旧鍵 test-key-1）をキャッシュに載せる
-      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+      assert.is_truthy(jwt_validator.validate(conf, make()))
 
       -- renew を「取得（コールバック）は成功するが、キャッシュへの書き込みで失敗する」
       -- ケースに差し替える（実 mlcache では shm 書き込み失敗時に既存値へ触れず err を返す）
@@ -472,7 +523,7 @@ describe("obo: jwt_validator (unit)", function()
 
       -- 未知 kid → 再取得は成功するが再投入に失敗する
       local claims, err, is_upstream =
-        jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+        jwt_validator.validate(conf, make(nil, { kid = "test-key-2" }))
       assert.is_nil(claims)
       assert.is_string(err)
       -- 受信トークンの不正ではなくキャッシュ層の異常なので upstream エラー（502 経路）
@@ -482,7 +533,7 @@ describe("obo: jwt_validator (unit)", function()
 
       -- 旧鍵 test-key-1 のトークンは引き続き検証できる（HTTP 再取得も不要 = キャッシュヒット）
       local calls_before = http_call_count
-      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+      assert.is_truthy(jwt_validator.validate(conf, make()))
       assert.equal(0, http_call_count - calls_before)
     end)
 
@@ -492,35 +543,35 @@ describe("obo: jwt_validator (unit)", function()
     -- 「トークンを直せ」という誤ったシグナルを返してしまう
     it("再取得失敗後の抑止期間中の未知 kid は upstream エラー（502 経路）として返す", function()
       -- まず正常なトークンで JWKS（旧鍵 test-key-1）をキャッシュに載せる
-      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+      assert.is_truthy(jwt_validator.validate(conf, make()))
 
       -- IdP を全断させる
       http_responses = {}
 
       -- 1 回目の未知 kid: 再取得を試みて失敗 → upstream エラー
-      local _, err1, up1 = jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+      local _, err1, up1 = jwt_validator.validate(conf, make(nil, { kid = "test-key-2" }))
       assert.is_string(err1)
       assert.is_truthy(up1)
 
       -- 2 回目（抑止期間中）: 再取得はデバウンスで抑止されるが、直前の失敗が
       -- 続いているとみなして upstream エラーとして返すこと
-      local claims2, err2, up2 = jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+      local claims2, err2, up2 = jwt_validator.validate(conf, make(nil, { kid = "test-key-2" }))
       assert.is_nil(claims2)
       assert.is_string(err2)
       assert.is_truthy(up2)
 
       -- 回帰確認: 抑止期間中でも、キャッシュ済みの旧鍵 test-key-1 のトークンは検証成功する
-      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+      assert.is_truthy(jwt_validator.validate(conf, make()))
     end)
 
     it("再取得成功後の抑止期間中の未知 kid は upstream エラーにしない（401 のまま）", function()
       -- IdP は正常応答のまま。未知 kid → 再取得成功、しかし kid は本当に存在しない
-      local _, err1, up1 = jwt_validator.validate(conf, jwt.make(nil, { kid = "no-such-kid" }))
+      local _, err1, up1 = jwt_validator.validate(conf, make(nil, { kid = "no-such-kid" }))
       assert.is_string(err1)
       assert.is_falsy(up1)
 
       -- 抑止期間中の 2 回目も、直前の再取得は成功している（IdP は健在）ので 401 のまま
-      local claims2, err2, up2 = jwt_validator.validate(conf, jwt.make(nil, { kid = "no-such-kid" }))
+      local claims2, err2, up2 = jwt_validator.validate(conf, make(nil, { kid = "no-such-kid" }))
       assert.is_nil(claims2)
       assert.is_string(err2)
       assert.is_falsy(up2)

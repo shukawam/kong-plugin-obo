@@ -83,12 +83,33 @@ local function http_get_json(conf, url)
   return body
 end
 
--- OpenID configuration の取得元 authority（= 期待される issuer）を導出するローカル関数。
+-- OpenID configuration の取得元 authority を導出するローカル関数。
 -- OIDC Discovery ではメタデータの issuer が、メタデータ取得に使った authority
--- （{identity_base_url}/{tenant_id}/v2.0）と完全一致しなければならない。
--- conf.issuer（受信トークンの iss 期待値の上書き）とは別概念なので、ここでは常に導出値を使う
+-- （{identity_base_url}/{tenant_id}/v2.0）と完全一致しなければならない
 local function metadata_authority(conf)
   return util.build_tenant_url(conf.identity_base_url, conf.tenant_id, "v2.0")
+end
+
+-- メタデータが自己申告した issuer を検証するローカル関数。
+-- 検証を通った issuer が、受信トークンの iss クレームの「唯一の期待値」になる。
+-- @return 検証済み issuer 文字列。問題があれば nil, エラー理由
+local function validate_metadata_issuer(conf, issuer)
+  if type(issuer) ~= "string" then
+    return nil, "issuer missing in openid-configuration"
+  end
+  -- OIDC Discovery: issuer は取得元 authority と完全一致すること。
+  -- 不一致はメタデータの正当性が疑わしい（IdP 側の異常）ため取得失敗として扱う
+  if issuer ~= metadata_authority(conf) then
+    return nil, "openid-configuration issuer mismatch"
+  end
+  -- conf.issuer はメタデータ issuer に対する任意の「ピン」（追加の防御）。
+  -- 設定されている場合、メタデータの issuer がその値と完全一致しなければ拒否する。
+  -- ※ 受信トークンの iss の期待値を別の値に置き換える用途には使えない
+  --   （メタデータと矛盾する期待値は設定事故か IdP 異常のどちらかであるため fail-close する）
+  if conf.issuer ~= nil and conf.issuer ~= issuer then
+    return nil, "openid-configuration issuer does not match configured issuer"
+  end
+  return issuer
 end
 
 -- メタデータが返した jwks_uri の scheme と host を検証するローカル関数。
@@ -114,9 +135,11 @@ local function validate_jwks_uri(conf, jwks_uri)
   return true
 end
 
--- OpenID 設定 → JWKS の順に取得し、kid → JWK(JSON文字列) のテーブルを作るローカル関数
+-- OpenID 設定 → JWKS の順に取得し、検証済み issuer と kid → JWK(JSON文字列) の
+-- テーブルをまとめて返すローカル関数。
 -- kong.cache のコールバックとして呼ばれる（キャッシュミス時のみ実行される）
-local function load_jwks(conf)
+-- @return { issuer = 検証済み issuer, keys = { kid → JWK JSON 文字列 } }。失敗時は nil, err
+local function load_metadata(conf)
   -- v2.0 のメタデータ URL（docs/obo/05）。URL 連結は util.build_tenant_url に集約
   local config_url = util.build_tenant_url(conf.identity_base_url, conf.tenant_id,
       "v2.0/.well-known/openid-configuration")
@@ -124,11 +147,12 @@ local function load_jwks(conf)
   if not oidc then
     return nil, err
   end
-  -- OIDC Discovery: issuer は取得元 authority と完全一致すること。
-  -- 不一致はメタデータの正当性が疑わしい（IdP 側の異常）ため取得失敗として扱う
-  if oidc.issuer ~= metadata_authority(conf) then
-    return nil, "openid-configuration issuer mismatch"
+
+  local issuer, iss_err = validate_metadata_issuer(conf, oidc.issuer)
+  if not issuer then
+    return nil, iss_err
   end
+
   if type(oidc.jwks_uri) ~= "string" then
     return nil, "jwks_uri missing in openid-configuration"
   end
@@ -146,14 +170,35 @@ local function load_jwks(conf)
     return nil, "keys missing in JWKS"
   end
 
-  -- kid で引けるように整形する。pkey.new に渡せるよう JWK は JSON 文字列のまま保持する
+  -- issuer のパスからテナント ID（GUID）部分を取り出す（下の署名鍵 issuer 検証で使う）
+  local issuer_tenant = issuer:match("://[^/]+/([^/]+)/v2%.0$")
+
+  -- kid で引けるように整形する。pkey.new に渡せるよう JWK は JSON 文字列のまま保持する。
+  -- 署名鍵の issuer 検証（docs/obo/05 "Validate the signing key issuer"）:
+  -- Entra の JWKS は鍵エントリに issuer フィールドを含むことがある（実 JWKS で確認済み。
+  -- 多くは "{tenantid}" プレースホルダ入り、一部は具体的なテナント GUID）。
+  -- 存在する場合はプレースホルダを実テナントに置換した上でメタデータの issuer と
+  -- 完全一致しない鍵は取り込まない（他 issuer の鍵での署名検証を防ぐ）
   local by_kid = {}
   for _, jwk in ipairs(jwks.keys) do
     if type(jwk) == "table" and type(jwk.kid) == "string" then
-      by_kid[jwk.kid] = cjson.encode(jwk)
+      local key_issuer_ok = true
+      if jwk.issuer ~= nil then
+        if type(jwk.issuer) == "string" and issuer_tenant then
+          -- gsub の第 4 引数 1 は「最初の 1 回だけ置換」。{tenantid} は Lua パターンの
+          -- 特殊文字を含まないのでそのまま検索文字列に使える
+          local resolved = jwk.issuer:gsub("{tenantid}", issuer_tenant, 1)
+          key_issuer_ok = (resolved == issuer)
+        else
+          key_issuer_ok = false
+        end
+      end
+      if key_issuer_ok then
+        by_kid[jwk.kid] = cjson.encode(jwk)
+      end
     end
   end
-  return by_kid
+  return { issuer = issuer, keys = by_kid }
 end
 
 -- テナントごとの JWKS キャッシュキーを作るローカル関数
@@ -161,25 +206,26 @@ local function jwks_cache_key(conf)
   return "obo:jwks:" .. conf.identity_base_url .. ":" .. conf.tenant_id
 end
 
--- kid に対応する JWK(JSON文字列) を返すローカル関数
+-- kid に対応する署名鍵と検証済み issuer を返すローカル関数
 -- 見つからない場合は 1 回だけ再取得を試み、取得に成功したときのみキャッシュを置換する
 -- （鍵ロールオーバー対応。取得失敗時は既存の stale キャッシュを温存する。Issue #3）
--- @return jwk_json, err, is_upstream_error
+-- @return { jwk_json = JWK の JSON 文字列, issuer = 検証済みメタデータ issuer }。
+--         失敗時は nil, err, is_upstream_error。
 --   is_upstream_error が true の場合、失敗理由は「受信トークンが不正」ではなく
 --   「Entra ID（OpenID configuration / JWKS）に接続できない、または応答が不正な形」であることを示す。
 --   設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のマッピングで
 --   「受信 JWT の検証失敗 → 401」と「Entra ID への接続失敗 / 5xx → 502」を区別するために使う。
-local function get_jwk_for_kid(conf, kid)
+local function get_signing_key(conf, kid)
   local cache_key = jwks_cache_key(conf)
 
-  local by_kid, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
-  if not by_kid then
-    -- load_jwks の失敗は常に Entra ID への接続・応答形式の問題であり、
+  local meta, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
+  if not meta then
+    -- load_metadata の失敗は常に Entra ID への接続・応答形式の問題であり、
     -- 受信トークン自体の不正ではない
     return nil, tostring(err), true
   end
-  if by_kid[kid] then
-    return by_kid[kid]
+  if meta.keys[kid] then
+    return { jwk_json = meta.keys[kid], issuer = meta.issuer }
   end
 
   -- 未知 kid での再取得はワーカー単位で頻度制限する。
@@ -205,7 +251,7 @@ local function get_jwk_for_kid(conf, kid)
   --
   -- renew の実装根拠（Kong 3.9.2 / 3.14.0.7 のコンテナ内ソースで裏取り済み。
   -- kong/cache/init.lua と kong/resty/mlcache/init.lua）:
-  --   * コールバック（load_jwks）は get の L3 コールバックと同じキー単位ロックの中で
+  --   * コールバック（load_metadata）は get の L3 コールバックと同じキー単位ロックの中で
   --     実行される。同一ノード内で複数ワーカーに未知 kid が同時到達しても取得は直列化され、
   --     待機中に他ワーカーが更新済みならバージョン比較でコールバック自体をスキップする。
   --   * コールバックが失敗（nil, err）した場合は shm に一切書き込まず err を返す。
@@ -214,7 +260,7 @@ local function get_jwk_for_kid(conf, kid)
   --     クラスタイベント（cluster_events:broadcast）は使わないため、他ノードの正常な
   --     キャッシュを消すことがない（他ノードは各自の未知 kid 検出時に各自 renew する）。
   --     クラスタ全体へ無効化を配信する kong.cache:invalidate はここでは使ってはならない。
-  local fresh, renew_err = kong.cache:renew(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
+  local fresh, renew_err = kong.cache:renew(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
   if not fresh then
     -- 再取得失敗: 既存キャッシュ（stale だが有効）は renew が温存している。
     -- 失敗理由は Entra ID への接続・応答形式の問題、またはキャッシュ層の書き込み異常で
@@ -226,11 +272,11 @@ local function get_jwk_for_kid(conf, kid)
   -- 再取得成功: 失敗フラグを解除する（以後の抑止期間中の未知 kid は 401 分類に戻る）
   last_refetch_failed[cache_key] = nil
 
-  if fresh[kid] then
-    return fresh[kid]
+  if fresh.keys[kid] then
+    return { jwk_json = fresh.keys[kid], issuer = fresh.issuer }
   end
   -- IdP には正常に接続できたが、この kid の鍵が存在しない
-  -- （鍵ロールオーバーに追従できていない、または不正な kid を送ってきた）
+  -- （鍵ロールオーバーに追従できていない、不正な kid、または issuer 不一致で除外された鍵）
   return nil, "no key found in JWKS for kid"
 end
 
@@ -257,14 +303,14 @@ function M.validate(conf, token)
     return nil, "kid missing in JWT header"
   end
 
-  local jwk_json, key_err, key_upstream = get_jwk_for_kid(conf, jwt.header.kid)
-  if not jwk_json then
+  local key, key_err, key_upstream = get_signing_key(conf, jwt.header.kid)
+  if not key then
     return nil, key_err, key_upstream
   end
 
   -- kid は一致したが JWK 自体が壊れている（n/e が不正等）場合、受信トークンではなく
   -- Entra ID 側データの異常なので、他の JWKS 取得失敗と同様に upstream エラーとして扱う
-  local pk, pkey_err = pkey.new(jwk_json, { format = "JWK" })
+  local pk, pkey_err = pkey.new(key.jwk_json, { format = "JWK" })
   if not pk then
     return nil, "failed to load JWK: " .. tostring(pkey_err), true
   end
@@ -278,10 +324,11 @@ function M.validate(conf, token)
   -- ---- クレーム検証（署名検証が通ってから行う）----
   local claims = jwt.payload
 
-  -- iss: メタデータの issuer と完全一致が原則（docs/obo/05）。
-  -- conf.issuer 未指定なら v2.0 の形式（{base}/{tenant}/v2.0）を導出する
-  local expected_iss = conf.issuer or metadata_authority(conf)
-  if claims.iss ~= expected_iss then
+  -- iss: メタデータの issuer と完全一致を要求する（docs/obo/05: OpenID Connect Core の
+  -- 「メタデータの Issuer Identifier と iss クレームの完全一致」）。
+  -- 検証済みメタデータ issuer が唯一の期待値であり、conf.issuer は
+  -- メタデータ issuer のピンとして load_metadata 側で照合済み
+  if claims.iss ~= key.issuer then
     return nil, "issuer mismatch"
   end
 
