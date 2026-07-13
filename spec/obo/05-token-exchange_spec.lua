@@ -294,6 +294,44 @@ describe("obo: token_exchange (unit)", function()
     assert.equal(502, err.status)
   end)
 
+  -- ------------------------------------------------------------------
+  -- 追跡用 ID の伝搬（Issue #9）
+  -- ------------------------------------------------------------------
+
+  it("Entra のエラー JSON に trace_id / correlation_id があれば err テーブルに載せる（Issue #9）", function()
+    -- error_description をそのままログに出さなくても、サポート問い合わせに必要な
+    -- 追跡用 ID をログで確認できるようにするための伝搬（詳細は docs/obo/03 のエラー例）
+    mock_res = {
+      status = 400,
+      body = cjson.encode({
+        error = "interaction_required",
+        error_description = "AADSTS50079: ...\r\nTrace ID: 0000aaaa-11bb-cccc-dd22-eeeeee333333",
+        error_codes = { 50079 },
+        timestamp = "2017-05-01 22:43:20Z",
+        trace_id = "0000aaaa-11bb-cccc-dd22-eeeeee333333",
+        correlation_id = "aaaa0000-bb11-2222-33cc-444444dddddd",
+      }),
+    }
+    local res, err = token_exchange.exchange(conf, "t")
+    assert.is_nil(res)
+    assert.equal("0000aaaa-11bb-cccc-dd22-eeeeee333333", err.trace_id)
+    assert.equal("aaaa0000-bb11-2222-33cc-444444dddddd", err.correlation_id)
+  end)
+
+  it("trace_id / correlation_id が無い場合は err に含まれない", function()
+    mock_res = {
+      status = 400,
+      body = cjson.encode({
+        error = "invalid_grant",
+        error_description = "some description",
+      }),
+    }
+    local res, err = token_exchange.exchange(conf, "t")
+    assert.is_nil(res)
+    assert.is_nil(err.trace_id)
+    assert.is_nil(err.correlation_id)
+  end)
+
   it("接続失敗は status=502 のエラーとして返す", function()
     mock_err = "connection refused"
     local res, err = token_exchange.exchange(conf, "t")

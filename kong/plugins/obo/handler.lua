@@ -11,6 +11,7 @@ local jwt_validator   = require "kong.plugins.obo.jwt_validator"
 local scope_validator = require "kong.plugins.obo.scope_validator"
 local token_exchange  = require "kong.plugins.obo.token_exchange"
 local token_cache     = require "kong.plugins.obo.token_cache"
+local util            = require "kong.plugins.obo.util"
 
 local plugin = {
   -- PRIORITY はプラグインの実行順序を決める（大きいほど先）。
@@ -45,7 +46,9 @@ end
 -- @param reason 内部ログ用の理由
 -- @param www_authenticate WWW-Authenticate ヘッダーの値（省略時は realm のみ）
 local function unauthorized(reason, www_authenticate)
-  kong.log.debug("obo: unauthorized: ", reason)
+  -- reason には受信 JWT のヘッダー値（alg 等、クライアント制御下）に由来する文字列が
+  -- 含まれることがあるため、ログに出す前に無害化する（Issue #9）
+  kong.log.debug("obo: unauthorized: ", util.sanitize_log_value(reason))
   return kong.response.exit(401, { message = "Unauthorized" }, {
     ["WWW-Authenticate"] = www_authenticate or 'Bearer realm="kong"',
   })
@@ -76,7 +79,8 @@ function plugin:access(conf)
       -- 受信トークンではなく Entra ID（OpenID configuration / JWKS）への接続・応答が
       -- 原因の失敗。「トークンが不正」（401）ではなく「IdP に到達できない」（502）として扱う
       -- （docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）
-      kong.log.debug("obo: jwt validation failed due to upstream error: ", validate_err)
+      kong.log.debug("obo: jwt validation failed due to upstream error: ",
+                     util.sanitize_log_value(validate_err))
       return kong.response.exit(502, { message = "Bad Gateway" })
     end
     return unauthorized(validate_err, 'Bearer error="invalid_token"')
@@ -97,8 +101,13 @@ function plugin:access(conf)
 
   if not access_token then
     local err = type(exchange_err) == "table" and exchange_err or {}
-    kong.log.debug("obo: token exchange failed: ", err.error or "unknown",
-                   " ", err.detail or "")
+    -- err.detail（Entra の error_description）は PII や CR/LF を含みうる外部由来の文字列
+    -- なので、そのままログに出さず無害化する（Issue #9）。error 識別子・trace_id・
+    -- correlation_id は運用上の追跡に必要な情報なので detail とは別に個別にログへ載せる
+    kong.log.debug("obo: token exchange failed: error=", util.sanitize_log_value(err.error or "unknown"),
+                   " trace_id=", util.sanitize_log_value(err.trace_id),
+                   " correlation_id=", util.sanitize_log_value(err.correlation_id),
+                   " detail=", util.sanitize_log_value(err.detail))
 
     if err.status == 401 then
       -- Entra のエラーとクレームチャレンジは WWW-Authenticate で伝搬する（docs/obo/03）。

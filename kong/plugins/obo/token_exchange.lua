@@ -155,6 +155,12 @@ function M.exchange(conf, incoming_token)
       error = "temporarily_unavailable",
       retry_after = safe_retry_after(res.headers),
       detail = json.error_description,  -- 内部ログ専用。レスポンスに出さないこと
+      -- trace_id / correlation_id は Entra のエラーレスポンスに含まれる追跡用 ID
+      -- （docs/obo/03 のエラー例参照）。サポート問い合わせの際に必要になる情報なので、
+      -- PII を含みうる error_description をログにそのまま出さなくても運用上追跡できるよう
+      -- err テーブルに個別に載せておく（Issue #9）
+      trace_id = type(json.trace_id) == "string" and json.trace_id or nil,
+      correlation_id = type(json.correlation_id) == "string" and json.correlation_id or nil,
     }
   end
 
@@ -171,6 +177,12 @@ function M.exchange(conf, incoming_token)
       status = status,
       error  = json.error,
       detail = json.error_description,  -- 内部ログ専用。レスポンスに出さないこと
+      -- trace_id / correlation_id は Entra のエラーレスポンスに含まれる追跡用 ID
+      -- （docs/obo/03 のエラー例参照）。サポート問い合わせの際に必要になる情報なので、
+      -- PII を含みうる error_description をログにそのまま出さなくても運用上追跡できるよう
+      -- err テーブルに個別に載せておく（Issue #9）
+      trace_id = type(json.trace_id) == "string" and json.trace_id or nil,
+      correlation_id = type(json.correlation_id) == "string" and json.correlation_id or nil,
     }
     if status == 401 then
       -- クレームチャレンジは 401 の場合のみ handler が WWW-Authenticate に載せる（docs/obo/03）

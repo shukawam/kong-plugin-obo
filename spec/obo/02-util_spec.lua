@@ -159,6 +159,57 @@ describe("obo: util.url_scheme_authority (unit)", function()
   end)
 end)
 
+-- ログ出力用の無害化関数のテスト（Issue #9）
+-- IdP（Entra ID）の error_description など、外部から来る文字列をそのまま debug ログに
+-- 出すと、CR/LF によるログインジェクションや、巨大文字列によるログ肥大化の恐れがある
+describe("obo: util.sanitize_log_value (unit)", function()
+  local util
+
+  setup(function()
+    util = require("kong.plugins.obo.util")
+  end)
+
+  teardown(function()
+    package.loaded["kong.plugins.obo.util"] = nil
+  end)
+
+  it("CR/LF を含む文字列は制御文字が取り除かれ 1 行になる", function()
+    local input = "AADSTS50079: some message\r\nTrace ID: abc\r\nInjected: fake log line"
+    local sanitized = util.sanitize_log_value(input)
+    assert.is_nil(sanitized:find("\r", 1, true))
+    assert.is_nil(sanitized:find("\n", 1, true))
+  end)
+
+  it("既定の上限（256文字）を超える文字列は切り詰められる", function()
+    local input = string.rep("x", 1000)
+    local sanitized = util.sanitize_log_value(input)
+    assert.is_true(#sanitized <= 256)
+  end)
+
+  it("max_len を指定すればその長さで切り詰められる", function()
+    local input = string.rep("y", 100)
+    local sanitized = util.sanitize_log_value(input, 10)
+    assert.is_true(#sanitized <= 10)
+  end)
+
+  it("NUL やタブなどその他の制御文字も除去される", function()
+    local input = "a\0b\tc\127d"
+    local sanitized = util.sanitize_log_value(input)
+    assert.is_nil(sanitized:find("\0", 1, true))
+    assert.is_nil(sanitized:find("\127", 1, true))
+  end)
+
+  it("文字列以外（nil・数値・テーブル）は空文字を返す", function()
+    assert.equal("", util.sanitize_log_value(nil))
+    assert.equal("", util.sanitize_log_value(12345))
+    assert.equal("", util.sanitize_log_value({}))
+  end)
+
+  it("制御文字も長大でもない通常の文字列はそのまま返す", function()
+    assert.equal("interaction_required", util.sanitize_log_value("interaction_required"))
+  end)
+end)
+
 describe("obo: fixtures (unit)", function()
   it("jwt.make が作ったトークンをフィクスチャの公開鍵で検証できる", function()
     local pkey = require "resty.openssl.pkey"

@@ -93,4 +93,39 @@ function M.url_scheme_authority(url)
   return scheme:lower(), authority
 end
 
+-- ログに出力する文字列の既定の上限長（文字数）。
+-- IdP（Entra ID）の error_description は数百文字に及ぶことがあるため、
+-- ログ集約基盤を肥大化させない程度の長さに抑える
+local DEFAULT_LOG_VALUE_MAX_LEN = 256
+
+-- 外部（IdP のエラーレスポンスや、クライアントが送ってきた JWT のヘッダーなど）由来の
+-- 文字列を debug ログに出す前に無害化するローカル関数（Issue #9）。
+--
+-- 何をなぜ無害化するか:
+--   ・CR/LF を含む制御文字（0x00-0x1F, 0x7F）を空白 1 文字に置換する。
+--     これらをそのままログに書くと、1 回の呼び出しが複数行のログとして解釈され、
+--     あたかも別の（偽の）ログ行が追加されたように見える「ログインジェクション」を
+--     引き起こしうる。空白に置換することで見た目上 1 行に保つ。
+--   ・長さを上限（既定 256 文字）で切り詰める。IdP のエラーメッセージには
+--     ユーザーの UPN やメールアドレス等の PII が混ざることがあり、また巨大な
+--     文字列は単純にログ集約基盤を圧迫する。切り詰めにより影響を限定する。
+-- @param value 無害化したい値。文字列以外（nil・数値・テーブル等）は空文字を返す
+-- @param max_len 切り詰める上限長（省略時は 256 文字）
+-- @return 無害化後の文字列
+function M.sanitize_log_value(value, max_len)
+  if type(value) ~= "string" then
+    return ""
+  end
+  max_len = max_len or DEFAULT_LOG_VALUE_MAX_LEN
+
+  -- Lua パターンの %z は埋め込み NUL（\0）を表す（Lua 5.1 の文字列は \0 を含みうるため）。
+  -- \1-\31 は残りの C0 制御文字、127 は DEL。まとめて空白に置換する
+  local sanitized = value:gsub("[%z\1-\31\127]", " ")
+
+  if #sanitized > max_len then
+    sanitized = sanitized:sub(1, max_len)
+  end
+  return sanitized
+end
+
 return M
