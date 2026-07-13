@@ -182,12 +182,17 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.required_scopes)
   end)
 
-  it("required_roles の要素はスペースを含んでもよい（roles は配列なのでロール名に空白を含み得る）", function()
+  it("required_roles の要素にスペースを含む文字列を拒否する（app role の Value は空白不可のため絶対に一致しない）", function()
+    -- Entra ID の roles クレームに入るのは app role の「Value」であり、Value は
+    -- "The value can't contain spaces." と明記されている（空白を含められるのは Display name のみ）。
+    -- 出典: https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps
+    --       "Declare roles for an application" の Value 行。
+    -- よって空白入りの required_roles は恒常 403 になる設定ミスとして schema で弾く
     local config = base_config()
     config.required_roles = { "Task Admin Role" }
     local ok, err = validate(config)
-    assert.is_nil(err)
-    assert.is_truthy(ok)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_roles)
   end)
 
   -- 外部レビュー指摘（fail-open 防止）: 「省略（未設定）は許可、明示的な空配列は拒否」。

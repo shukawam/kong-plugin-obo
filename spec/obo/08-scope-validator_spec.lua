@@ -70,10 +70,36 @@ describe("obo: scope_validator (unit)", function()
   end)
 
   -- ---- required_roles（アプリロール）----
+  -- 注意: roles は app-only トークンにも含まれるため、required_roles のみの設定でも
+  -- 「非空の scp が存在すること」を併せて要求する（ユーザートークンであることの担保）。
+  -- 出典: claims-validation "Validate the actor" — scp が存在しないのは
+  -- Daemon apps / app only permission, ID tokens。OBO はユーザープリンシパル専用（docs/obo/06）
 
-  it("roles に必須ロールが全て含まれれば認可する", function()
+  it("roles に必須ロールが全て含まれれば認可する（非空の scp を持つユーザートークン）", function()
     local conf = { required_roles = { "Task.Admin" } }
-    local ok = scope_validator.authorize(conf, { roles = { "Task.Read", "Task.Admin" } })
+    local ok = scope_validator.authorize(conf,
+      { scp = "access_as_user", roles = { "Task.Read", "Task.Admin" } })
+    assert.is_true(ok)
+  end)
+
+  it("required_roles のみ設定でも、scp 欠落トークン（app-only / id_token 相当）は拒否する", function()
+    -- roles は一致していても、scp が無い＝ユーザー委任トークンではないので OBO 対象外
+    local conf = { required_roles = { "Task.Admin" } }
+    local ok, err = scope_validator.authorize(conf, { roles = { "Task.Admin" } })  -- scp なし
+    assert.is_nil(ok)
+    assert.is_string(err)
+  end)
+
+  it("required_roles のみ設定時、scp が空文字列・空白のみなら欠落として拒否する", function()
+    local conf = { required_roles = { "Task.Admin" } }
+    assert.is_nil(scope_validator.authorize(conf, { scp = "", roles = { "Task.Admin" } }))
+    assert.is_nil(scope_validator.authorize(conf, { scp = "   ", roles = { "Task.Admin" } }))
+  end)
+
+  it("required_roles のみ設定時、scp の値は照合しない（存在チェックのみ）", function()
+    -- required_scopes を設定していないので scp の中身は問わない。存在だけを要求する
+    local conf = { required_roles = { "Task.Admin" } }
+    local ok = scope_validator.authorize(conf, { scp = "whatever_scope", roles = { "Task.Admin" } })
     assert.is_true(ok)
   end)
 

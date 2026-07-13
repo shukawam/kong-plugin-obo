@@ -15,6 +15,8 @@
 --              「必須スコープ不足」となり拒否される。OBO はユーザープリンシパルのみ対象なので妥当。
 --   - roles: 文字列の配列。app-only トークンにもユーザーの割当ロールにも使われるため、
 --            「ユーザートークンかどうか」の判定には使わない（同 access-token-claims-reference roles 行）。
+--            → そのため required_roles のみの設定でも「非空の scp の存在」を併せて要求し、
+--              app-only / ID トークンが roles 一致だけで OBO 交換に進むのを防ぐ。
 
 local M = {}
 
@@ -80,6 +82,17 @@ function M.authorize(conf, claims)
 
   -- required_roles: 同様に、設定され 1 件以上あるときだけ検査する（空配列は schema で拒否済み）
   if not is_unset(conf.required_roles) and #conf.required_roles > 0 then
+    -- roles は app-only トークンにもユーザートークンにも含まれるため、roles の一致だけでは
+    -- 「ユーザー委任トークンであること」を担保できない。OBO はユーザープリンシパル専用
+    -- （docs/obo/06 "Client limitations"）なので、required_roles のみの設定でも
+    -- 「非空の scp が存在すること」を要求する（scp の値は照合しない。存在チェックのみ。
+    -- 値の照合が必要なら required_scopes を併用する）。
+    -- scp が存在しないのは Daemon apps / app-only permission, ID tokens
+    -- （https://learn.microsoft.com/en-us/entra/identity-platform/claims-validation
+    --   "Validate the actor" セクション）
+    if type(claims.scp) ~= "string" or not claims.scp:find("%S") then
+      return nil, "token has no scp claim (app-only or non-user token)"
+    end
     local roles = parse_roles(claims.roles)
     if not all_present(conf.required_roles, roles) then
       return nil, "token is missing one or more required roles"

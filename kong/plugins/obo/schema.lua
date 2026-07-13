@@ -62,9 +62,15 @@ local schema = {
           -- 設定すると、roles にこれら全てを含まないトークンを 403 で拒否する。未設定なら検査しない。
           -- roles は「文字列の配列」で、app-only トークンにもユーザーの割当ロールにも使われるため、
           -- 「ユーザートークンかどうか」の判定には使わない（docs/obo/05 の roles 行）。
-          -- len_min = 1: required_scopes と同じく、明示的な空配列（fail-open のもと）を拒否する
+          -- このため required_roles のみ設定時も scope_validator が非空の scp の存在を要求する。
+          -- len_min = 1: required_scopes と同じく、明示的な空配列（fail-open のもと）を拒否する。
+          -- match = "^%S+$": roles クレームに入る app role の「Value」は空白を含められない
+          -- （"The value can't contain spaces."
+          --   https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps
+          --   の Value 行。空白を含められるのは Display name のみ）ため、
+          -- 空白入りの要素は絶対に一致しない設定ミスとして schema で弾く
           { required_roles = { type = "array", len_min = 1,
-              elements = { type = "string" } } },
+              elements = { type = "string", match = "^%S+$" } } },
 
           -- Entra ID のベース URL。通常は変更不要（統合テストではモック IdP に向ける）
           { identity_base_url = typedefs.url { required = true,
