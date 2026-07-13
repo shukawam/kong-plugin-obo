@@ -5,9 +5,8 @@ local rockspec_revision = "1"
 
 local github_account_name = "shukawam"
 local github_repo_name = "kong-plugin-obo"
--- リリースタグ運用を始めるまでは main ブランチを参照する。
--- リリース時は source を tag = package_version（例: "0.1.0"）へ切り替えること
-local git_checkout = "main"
+-- リリースタグ（v<version>）を参照する。リリース手順は docs/05-release.md を参照
+local git_checkout = "v" .. package_version
 
 
 package = package_name
@@ -15,7 +14,7 @@ version = package_version .. "-" .. rockspec_revision
 supported_platforms = { "linux", "macosx" }
 source = {
   url = "git+https://github.com/"..github_account_name.."/"..github_repo_name..".git",
-  branch = git_checkout,
+  tag = git_checkout,
 }
 
 

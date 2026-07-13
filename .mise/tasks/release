@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#MISE description="Create and push a release tag (v<version>) after version consistency checks"
+#MISE dir="{{ config_root }}"
+set -euo pipefail
+
+# ============================================================
+# リリースタグの作成と push
+# バージョンの唯一の正は rockspec の package_version。
+# 整合性チェック → 注釈付きタグ作成 → push（GitHub Actions が Release を自動作成）
+# ============================================================
+
+# 作業ツリーがクリーンであること（タグは必ずコミット済みの状態に打つ）
+if [ -n "$(git status --porcelain)" ]; then
+  echo "ERROR: 未コミットの変更があります。コミットしてから実行してください" >&2
+  exit 1
+fi
+
+# rockspec からバージョンを取得する
+ROCKSPEC=$(ls kong-plugin-obo-*.rockspec)
+VERSION=$(sed -n 's/^local package_version = "\([^"]*\)"/\1/p' "$ROCKSPEC")
+[ -n "$VERSION" ] || { echo "ERROR: ${ROCKSPEC} から package_version を読み取れません" >&2; exit 1; }
+TAG="v${VERSION}"
+
+# rockspec のファイル名と package_version の整合（LuaRocks はファイル名と中身の一致を要求する）
+case "$ROCKSPEC" in
+  "kong-plugin-obo-${VERSION}-"*.rockspec) ;;
+  *) echo "ERROR: rockspec のファイル名（${ROCKSPEC}）と package_version（${VERSION}）が一致しません" >&2; exit 1 ;;
+esac
+
+# handler.lua の VERSION と一致していること（Kong に表示されるプラグインバージョン）
+HANDLER_VERSION=$(sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p' kong/plugins/obo/handler.lua | head -1)
+if [ "$HANDLER_VERSION" != "$VERSION" ]; then
+  echo "ERROR: handler.lua の VERSION（${HANDLER_VERSION}）が rockspec（${VERSION}）と一致しません" >&2
+  exit 1
+fi
+
+# 同名タグが存在しないこと
+if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+  echo "ERROR: タグ ${TAG} は既に存在します。バージョンを上げてから実行してください（docs/05-release.md）" >&2
+  exit 1
+fi
+
+echo "==> リリース ${TAG} を作成します（コミット: $(git rev-parse --short HEAD)）"
+git tag -a "${TAG}" -m "Release ${TAG}"
+git push origin main "${TAG}"
+echo "完了: タグ ${TAG} を push しました。GitHub Actions が GitHub Release を自動作成します"

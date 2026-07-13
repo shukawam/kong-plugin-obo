@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+    - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+    # サプライチェーン攻撃対策としてアクションはコミット SHA で固定する（コメントは対応するバージョン）
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+    - name: Verify tag matches rockspec and plugin versions
+      run: |
+        VERSION="${GITHUB_REF_NAME#v}"
+        ROCKSPEC=$(ls kong-plugin-obo-*.rockspec)
+        # rockspec の package_version・handler.lua の VERSION がタグと一致すること
+        grep -q "^local package_version = \"${VERSION}\"" "$ROCKSPEC" || {
+          echo "::error::rockspec の package_version がタグ ${GITHUB_REF_NAME} と一致しません"; exit 1; }
+        case "$ROCKSPEC" in
+          "kong-plugin-obo-${VERSION}-"*.rockspec) ;;
+          *) echo "::error::rockspec のファイル名がタグ ${GITHUB_REF_NAME} と一致しません"; exit 1 ;;
+        esac
+        grep -q "VERSION = \"${VERSION}\"" kong/plugins/obo/handler.lua || {
+          echo "::error::handler.lua の VERSION がタグ ${GITHUB_REF_NAME} と一致しません"; exit 1; }
+
+    # rockspec 経由でインストールできることの検証（build.modules の記載漏れ等を検出）
+    - uses: leafo/gh-actions-lua@6919171ccf181b826f44b9bca76307b577217377 # v13.0.0
+      with:
+        luaVersion: "5.1"
+    - uses: leafo/gh-actions-luarocks@35d062def313a7699a0d513e996bcf4352f05389 # v6.1.0
+    - name: Smoke install via rockspec
+      run: luarocks make
+
+    - name: Create GitHub Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
