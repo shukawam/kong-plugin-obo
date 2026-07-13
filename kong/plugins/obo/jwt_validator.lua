@@ -32,6 +32,41 @@ local last_refetch = {}  -- jwks_cache_key -> ngx.time() of last refetch
 -- どちらに分類するかの判断に使う。直前の再取得が失敗していれば障害継続とみなす
 local last_refetch_failed = {}  -- jwks_cache_key -> true（直近の再取得が失敗）
 
+-- JWK(JSON文字列) → pkey オブジェクトのワーカーローカルなメモ化。
+-- JWKS キャッシュは shm 越しに共有するため JWK を JSON 文字列で保持しており（正しい設計）、
+-- その結果リクエストごとに pkey.new(JWK) で RSA 公開鍵をパースし直していた（実測 ~3.9us/req）。
+-- 同一 JWK に対する pkey オブジェクトをここにメモ化して再パースを避ける。
+-- キーは JWK JSON 文字列そのもの（内容アドレス方式）。鍵ロールオーバーで JWK が変われば
+-- 必ず別キーになるため、古い pkey が誤って使われることはない（stale 参照が起きない）。
+-- なお、ここに格納されるのは IdP が実際に配布した正常な鍵のみ（未知の kid は
+-- get_signing_key が nil を返すためここに到達せず、壊れた JWK はパース失敗で格納されない）。
+-- 上限は、多テナント設定や長期の鍵ローテーションでエントリが累積することへの保険である。
+-- 鍵はテナントあたり数個なので 32 で十分。超過時は丸ごと破棄する（再パースは安価なので許容）。
+local PKEY_MEMO_MAX = 32
+local pkey_memo = {}        -- jwk_json -> pkey オブジェクト
+local pkey_memo_count = 0   -- pkey_memo のエントリ数（#t はハッシュ部を数えられないため自前で持つ）
+
+-- JWK(JSON文字列) を pkey オブジェクトに変換するローカル関数（メモ化付き）
+-- @return pkey, err。パース失敗時は nil とエラー理由
+local function jwk_to_pkey(jwk_json)
+  local cached = pkey_memo[jwk_json]
+  if cached then
+    return cached
+  end
+  local pk, err = pkey.new(jwk_json, { format = "JWK" })
+  if not pk then
+    return nil, err
+  end
+  -- 上限に達していたら丸ごとクリアしてから入れ直す（単純な有界化）
+  if pkey_memo_count >= PKEY_MEMO_MAX then
+    pkey_memo = {}
+    pkey_memo_count = 0
+  end
+  pkey_memo[jwk_json] = pk
+  pkey_memo_count = pkey_memo_count + 1
+  return pk
+end
+
 -- JWT 文字列を分解して header / payload / signature を取り出すローカル関数
 -- @return { header, payload, signature, signing_input } のテーブル。不正なら nil とエラー
 local function decode_jwt(token)
@@ -354,7 +389,7 @@ function M.validate(conf, token)
 
   -- kid は一致したが JWK 自体が壊れている（n/e が不正等）場合、受信トークンではなく
   -- Entra ID 側データの異常なので、他の JWKS 取得失敗と同様に upstream エラーとして扱う
-  local pk, pkey_err = pkey.new(key.jwk_json, { format = "JWK" })
+  local pk, pkey_err = jwk_to_pkey(key.jwk_json)
   if not pk then
     return nil, "failed to load JWK: " .. tostring(pkey_err), true
   end
