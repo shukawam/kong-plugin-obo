@@ -337,24 +337,29 @@ describe("obo: jwt_validator (unit)", function()
 
   -- http_get_json の non-200 分岐（接続自体はできるが応答が異常）。
   -- 「接続できない」（res が nil）のケースとは別の分岐なので、明示的に status を非 200 にして確認する
-  it("openid-configuration が non-200 を返す場合はエラーを返す（接続不可とは別分岐）", function()
+  it("openid-configuration が non-200 を返す場合は upstream エラーを返す（接続不可とは別分岐）", function()
     http_responses[CONFIG_URL] = {
       status = 500,
       body = "Internal Server Error",
     }
-    local claims, err = jwt_validator.validate(conf, make())
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
+    -- non-200 応答は受信トークンの不正ではなく IdP 側の異常なので、
+    -- handler が 502 として扱えるよう upstream エラー（第 3 戻り値 true）になること
+    assert.is_true(is_upstream_error)
   end)
 
-  it("JWKS エンドポイントが non-200 を返す場合はエラーを返す（接続不可とは別分岐）", function()
+  it("JWKS エンドポイントが non-200 を返す場合は upstream エラーを返す（接続不可とは別分岐）", function()
     http_responses[JWKS_URL] = {
       status = 503,
       body = "Service Unavailable",
     }
-    local claims, err = jwt_validator.validate(conf, make())
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
+    -- 同上: JWKS の non-200 も upstream エラー（502 経路）として扱われること
+    assert.is_true(is_upstream_error)
   end)
 
   -- 設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のエラーマッピングでは
