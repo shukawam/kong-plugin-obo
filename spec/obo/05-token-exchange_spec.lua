@@ -103,6 +103,22 @@ describe("obo: token_exchange (unit)", function()
     assert.is_truthy(body.client_assertion:match("^[^.]+%.[^.]+%.[^.]+$"))
   end)
 
+  -- token_exchange.lua:40-43: private_key_jwt 方式で client_assertion.build 自体が
+  -- 失敗した場合、HTTP リクエストを送らずに status=500/client_assertion_failed を返すべき
+  it("private_key_jwt で client_assertion 生成に失敗したら status=500/client_assertion_failed を返す", function()
+    conf.client_auth_method = "private_key_jwt"
+    conf.client_secret = nil
+    conf.private_key = "not a pem"  -- pkey.new が失敗する不正な秘密鍵
+    conf.certificate_thumbprint = "TEST_THUMBPRINT"
+
+    local res, err = token_exchange.exchange(conf, "t")
+    assert.is_nil(res)
+    assert.equal(500, err.status)
+    assert.equal("client_assertion_failed", err.error)
+    -- アサーション生成前に失敗するため、IdP への HTTP リクエストは送信されないはず
+    assert.is_nil(captured)
+  end)
+
   it("成功レスポンスをテーブルで返す", function()
     local res, err = token_exchange.exchange(conf, "t")
     assert.is_nil(err)
