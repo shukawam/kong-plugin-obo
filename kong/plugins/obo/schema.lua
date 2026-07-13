@@ -51,7 +51,10 @@ local schema = {
           -- 未設定なら scp の検査は行わない（後方互換）。認可を別プラグイン等に委ねる運用も可能。
           -- scp は「スペース区切りのスコープ文字列」で、ユーザートークンにのみ含まれる
           --（docs/obo/05 / Microsoft "Access token claims reference" の scp 行）。
-          { required_scopes = { type = "array", elements = { type = "string" } } },
+          -- 要素に空白を含む値は設定ミス（scp のスペース区切りでは絶対に一致しない）なので、
+          -- Lua パターン ^%S+$（空白以外の文字が 1 文字以上）で弾いて早期に気づけるようにする
+          { required_scopes = { type = "array",
+              elements = { type = "string", match = "^%S+$" } } },
 
           -- 受信トークンに要求するアプリロール（roles クレーム）のリスト。
           -- 設定すると、roles にこれら全てを含まないトークンを 403 で拒否する。未設定なら検査しない。

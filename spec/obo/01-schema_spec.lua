@@ -166,4 +166,28 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.required_scopes)
   end)
 
+  it("required_scopes の要素にスペースを含む文字列を拒否する（scp はスペース区切りのため絶対に一致しない）", function()
+    local config = base_config()
+    config.required_scopes = { "access_as_user Files.Read" }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_scopes の要素に空文字列を拒否する", function()
+    local config = base_config()
+    config.required_scopes = { "" }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_roles の要素はスペースを含んでもよい（roles は配列なのでロール名に空白を含み得る）", function()
+    local config = base_config()
+    config.required_roles = { "Task Admin Role" }
+    local ok, err = validate(config)
+    assert.is_nil(err)
+    assert.is_truthy(ok)
+  end)
+
 end)

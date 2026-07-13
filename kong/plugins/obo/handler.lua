@@ -1,9 +1,11 @@
 -- obo プラグインのハンドラー（オーケストレーション）
 -- 処理の流れ（設計書 docs/superpowers/specs/2026-07-10-obo-plugin-design.md §1）:
---   ① Authorization ヘッダーから Bearer トークンを抽出
---   ② jwt_validator で検証（署名・iss・aud・exp・nbf）
---   ③ token_cache 経由で交換済みトークンを取得（ミス時は token_exchange が実行される）
---   ④ upstream への Authorization を交換後トークンに差し替え
+--   ①  Authorization ヘッダーから Bearer トークンを抽出
+--   ②  jwt_validator で認証（署名・iss・aud・exp・nbf）
+--   ②' scope_validator で認可（required_scopes / required_roles の scp / roles 検査。
+--       権限不足は 403 insufficient_scope、未設定なら検査なし）
+--   ③  token_cache 経由で交換済みトークンを取得（ミス時は token_exchange が実行される）
+--   ④  upstream への Authorization を交換後トークンに差し替え
 
 local jwt_validator   = require "kong.plugins.obo.jwt_validator"
 local scope_validator = require "kong.plugins.obo.scope_validator"

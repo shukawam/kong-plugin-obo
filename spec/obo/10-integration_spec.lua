@@ -156,13 +156,25 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
 
     it("required_scopes 不足（scp クレームなし）: 403 + insufficient_scope（IdP に送らない）", function()
       -- jwt.make() の既定トークンには scp が無い（＝ app-only 相当）。
-      -- 有効な署名・aud だが権限不足なので 401 ではなく 403 insufficient_scope で拒否する
+      -- 有効な署名・aud だが権限不足なので 401 ではなく 403 insufficient_scope で拒否する。
+      -- 権限不足のトークンでトークン交換（IdP 呼び出し）が発生しないことも、
+      -- モック IdP のトークンエンドポイント呼び出し回数カウンタ（/_calls）で検証する
+      local http = require "resty.http"
+      local function token_calls()
+        local c = assert(http.new())
+        local res = assert(c:request_uri(MOCK_IDP .. "/_calls"))
+        return tonumber(res.body:match("%d+"))
+      end
+
+      local before = token_calls()
       local r = client:get("/request", {
         headers = { host = "obo-scoped.example", authorization = "Bearer " .. jwt.make() },
       })
       assert.response(r).has.status(403)
       local www = assert.response(r).has.header("WWW-Authenticate")
       assert.is_truthy(www:find('error="insufficient_scope"', 1, true))
+      -- 403 の間、トークンエンドポイントは一度も呼ばれていないこと
+      assert.equal(before, token_calls())
     end)
 
     it("IdP に接続できない: 502", function()
