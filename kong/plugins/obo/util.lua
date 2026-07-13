@@ -93,25 +93,78 @@ function M.url_scheme_authority(url)
   return scheme:lower(), authority
 end
 
--- ログに出力する文字列の既定の上限長（文字数）。
+-- ログに出力する文字列の既定の上限長（バイト数）。
 -- IdP（Entra ID）の error_description は数百文字に及ぶことがあるため、
--- ログ集約基盤を肥大化させない程度の長さに抑える
+-- ログ集約基盤を肥大化させない程度の長さに抑える。
+-- Lua の `#` と string.sub はバイト単位で動作するため、この上限もバイト単位で扱う
 local DEFAULT_LOG_VALUE_MAX_LEN = 256
 
+-- バイト単位で切り詰めた文字列の末尾を UTF-8 の文字境界に揃えるローカル関数。
+-- 切り詰め位置がマルチバイト文字（日本語等）の途中に当たると、不完全なバイト列が
+-- 末尾に残ってログが文字化けするため、欠けた文字を丸ごと取り除く。
+--
+-- UTF-8 のバイト構造（RFC 3629）:
+--   ・0x00-0x7F: ASCII（1 バイトで完結）
+--   ・0xC0-0xF7: マルチバイト文字の先頭バイト（値から文字全体のバイト数が分かる）
+--   ・0x80-0xBF: マルチバイト文字の 2 バイト目以降（継続バイト）
+-- @param s バイト単位で切り詰め済みの文字列
+-- @return 末尾の不完全な UTF-8 シーケンスを取り除いた文字列
+local function trim_incomplete_utf8_tail(s)
+  local len = #s
+  if len == 0 then
+    return s
+  end
+
+  -- 末尾から先頭バイト（または ASCII）を探す。UTF-8 の 1 文字は最長 4 バイトなので、
+  -- 継続バイトを遡るのは最大 3 バイトで十分
+  local i = len
+  local steps = 0
+  while i >= 1 and steps < 3 do
+    local b = s:byte(i)  -- string.byte は指定位置のバイト値（0-255 の数値）を返す
+    if b < 0x80 then
+      return s  -- 末尾が ASCII なら文字は完結している
+    end
+    if b >= 0xC0 then
+      break  -- マルチバイト文字の先頭バイトを見つけた
+    end
+    i = i - 1  -- 継続バイト（0x80-0xBF）なのでさらに遡る
+    steps = steps + 1
+  end
+
+  local lead = s:byte(i)
+  if not lead or lead < 0xC0 then
+    -- 4 バイト以内に先頭バイトが見つからない = そもそも正しい UTF-8 ではない。
+    -- 文字境界の概念が適用できないため、そのまま返す（制御文字は除去済みで無害）
+    return s
+  end
+
+  -- 先頭バイトの値からこの文字の本来のバイト数を求める
+  -- （0xF0 以上なら 4 バイト、0xE0 以上なら 3 バイト、それ以外の先頭バイトは 2 バイト）
+  local expected = (lead >= 0xF0 and 4) or (lead >= 0xE0 and 3) or 2
+  if (len - i + 1) < expected then
+    -- 実際に残っているバイト数が足りない = 切り詰めで文字の途中が欠けている。
+    -- 不完全な文字を先頭バイトごと取り除いて文字境界に揃える
+    return s:sub(1, i - 1)
+  end
+  return s
+end
+
 -- 外部（IdP のエラーレスポンスや、クライアントが送ってきた JWT のヘッダーなど）由来の
--- 文字列を debug ログに出す前に無害化するローカル関数（Issue #9）。
+-- 文字列を debug ログに出す前に無害化する（Issue #9）。
 --
 -- 何をなぜ無害化するか:
 --   ・CR/LF を含む制御文字（0x00-0x1F, 0x7F）を空白 1 文字に置換する。
 --     これらをそのままログに書くと、1 回の呼び出しが複数行のログとして解釈され、
 --     あたかも別の（偽の）ログ行が追加されたように見える「ログインジェクション」を
 --     引き起こしうる。空白に置換することで見た目上 1 行に保つ。
---   ・長さを上限（既定 256 文字）で切り詰める。IdP のエラーメッセージには
+--   ・長さを上限（既定 256 バイト）で切り詰める。IdP のエラーメッセージには
 --     ユーザーの UPN やメールアドレス等の PII が混ざることがあり、また巨大な
 --     文字列は単純にログ集約基盤を圧迫する。切り詰めにより影響を限定する。
+--     切り詰めはバイト長ベースで行い、上限が UTF-8 マルチバイト文字の途中に
+--     当たった場合はその文字を丸ごと取り除いて文字境界に揃える（文字化け防止）。
 -- @param value 無害化したい値。文字列以外（nil・数値・テーブル等）は空文字を返す
--- @param max_len 切り詰める上限長（省略時は 256 文字）
--- @return 無害化後の文字列
+-- @param max_len 切り詰める上限バイト数（省略時は 256 バイト）
+-- @return 無害化後の文字列（長さは常に max_len バイト以下）
 function M.sanitize_log_value(value, max_len)
   if type(value) ~= "string" then
     return ""
@@ -123,7 +176,9 @@ function M.sanitize_log_value(value, max_len)
   local sanitized = value:gsub("[%z\1-\31\127]", " ")
 
   if #sanitized > max_len then
-    sanitized = sanitized:sub(1, max_len)
+    -- string.sub はバイト単位で切るため、UTF-8 文字の途中で切れることがある。
+    -- 切り詰めた場合のみ、末尾を文字境界に揃える
+    sanitized = trim_incomplete_utf8_tail(sanitized:sub(1, max_len))
   end
   return sanitized
 end
