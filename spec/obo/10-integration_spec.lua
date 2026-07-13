@@ -164,6 +164,8 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
     it("モック IdP: client_assertion_type が不正だと 400", function()
       local res = post_token(pkjwt_body({ client_assertion_type = "urn:wrong" }))
       assert.equal(400, res.status)
+      -- 意図したチェック（type 検証）で弾かれたことを error_description で自己診断する
+      assert.is_truthy(res.body:find("bad client_assertion_type", 1, true))
     end)
 
     it("モック IdP: client_assertion の aud が不一致だと 400", function()
@@ -171,6 +173,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         client_assertion = jwt.make_assertion({ aud = "https://login.microsoftonline.com/other/oauth2/v2.0/token" }),
       }))
       assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("aud mismatch", 1, true))
     end)
 
     it("モック IdP: client_assertion の署名が壊れていると 400", function()
@@ -179,11 +182,29 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
       local tampered = assertion:sub(1, -3) .. "xx"
       local res = post_token(pkjwt_body({ client_assertion = tampered }))
       assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("signature invalid", 1, true))
+    end)
+
+    it("モック IdP: PKCS#1 v1.5 パディングで署名した client_assertion は 400", function()
+      -- PSS パディング強制の直接証明。jwt.make は pk:sign(input, "sha256")（パディング
+      -- 引数なし = PKCS#1 v1.5 パディング）で署名するため、クレームだけ正しい assertion を
+      -- 作って送ると「署名パディングの違いだけ」で弾かれるはず。
+      -- もしこれが 200 になる場合、lua-resty-openssl がパディング引数を無視して
+      -- sign/verify 双方が PKCS#1 v1.5 に落ちている（実質 RS256 化）ことを意味する。
+      local pkcs1_assertion = jwt.make({
+        aud = MOCK_TOKEN_URL,   -- aud 検証は通る値にして、署名検証だけを失敗させる
+        iss = "test-client-id",
+        sub = "test-client-id",
+      })
+      local res = post_token(pkjwt_body({ client_assertion = pkcs1_assertion }))
+      assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("signature invalid", 1, true))
     end)
 
     it("モック IdP: client_assertion と一緒に client_secret を送ると 400", function()
       local res = post_token(pkjwt_body({ client_secret = "must-not-be-sent" }))
       assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("client_secret must not accompany", 1, true))
     end)
 
     it("Authorization ヘッダーなし: 401 + WWW-Authenticate", function()
