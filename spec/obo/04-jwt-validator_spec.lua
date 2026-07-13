@@ -112,6 +112,19 @@ describe("obo: jwt_validator (unit)", function()
     assert.is_truthy(claims)
   end)
 
+  -- 大文字 GUID の tenant_id を設定しても恒常 502 にならないこと。
+  -- Entra の実メタデータは（大文字 GUID で要求しても）issuer 内の GUID を小文字で返すため、
+  -- 導出値を大文字のまま比較すると metadata issuer 検証が常に失敗する。
+  -- util.build_tenant_url の小文字正規化でこれを吸収する。
+  it("大文字の tenant_id でもメタデータ issuer 検証・iss 導出が小文字の正規形で通る", function()
+    conf.tenant_id = "TEST-TENANT"  -- モックの URL・issuer は小文字（Entra の正規形を模倣）
+    conf.issuer = nil               -- 導出させる
+    local token = jwt.make({ iss = "https://mock-idp.example/test-tenant/v2.0" })
+    local claims, err = jwt_validator.validate(conf, token)
+    assert.is_nil(err)
+    assert.is_truthy(claims)
+  end)
+
   it("JWT の形式が不正なら拒否する", function()
     for _, bad in ipairs({ "", "abc", "a.b", "a.b.c.d", "!!!.???.***" }) do
       local claims, err = jwt_validator.validate(conf, bad)

@@ -22,7 +22,9 @@ local schema = {
         type = "record",
         fields = {
           -- Entra ID のテナント ID（GUID）。トークンエンドポイントと issuer の導出に使う。
-          -- 単一テナント前提のため GUID 形式のみ許可する（match で検証）
+          -- 単一テナント前提のため GUID 形式のみ許可する（match で検証）。
+          -- 大文字の GUID も受理するが、URL / issuer の導出時に util.build_tenant_url が
+          -- 小文字へ正規化する（Entra のメタデータ issuer は小文字 GUID で返るため）
           { tenant_id = { type = "string", required = true,
               match = TENANT_ID_GUID_PATTERN } },
 

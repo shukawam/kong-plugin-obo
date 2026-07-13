@@ -39,15 +39,24 @@ end
 -- identity_base_url の末尾スラッシュをここで正規化することで、設定に末尾スラッシュが
 -- 付いていても issuer が "...//tenant/v2.0" のように壊れることを防ぐ。
 -- @param base identity_base_url（例: "https://login.microsoftonline.com"。末尾 "/" 付き可）
--- @param tenant_id テナント ID（GUID）
+-- @param tenant_id テナント ID（GUID）。大文字は小文字に正規化される（下記コメント参照）
 -- @param path 連結する残りのパス（先頭スラッシュなし。省略時は {base}/{tenant} まで）
 --             例: "v2.0/.well-known/openid-configuration" / "oauth2/v2.0/token" / "v2.0"
--- @return 連結済み URL 文字列
+-- @return 連結済み URL 文字列。base / tenant_id が文字列でなければ nil とエラー理由
 function M.build_tenant_url(base, tenant_id, path)
+  -- 規約（エラーは nil, err の 2 値返し）に従い、不正な型では例外を投げず nil を返す。
+  -- スキーマで required になっているため通常は到達しない防御的ガード
+  if type(base) ~= "string" or type(tenant_id) ~= "string" then
+    return nil, "base and tenant_id must be strings"
+  end
   -- 末尾のスラッシュを（複数連続していても）まとめて 1 個も残さず除去する。
   -- gsub は (置換後文字列, 置換回数) を返すため括弧で 1 値に絞る
   base = (base:gsub("/+$", ""))
-  local url = base .. "/" .. tenant_id
+  -- tenant_id（GUID）を小文字に正規化する。Entra ID のメタデータは、大文字 GUID で
+  -- 要求しても issuer 内の GUID を小文字で返す（実メタデータで裏取り済み）ため、
+  -- 大文字のまま導出すると metadata issuer の完全一致検証が常に失敗してしまう。
+  -- GUID の 16 進表記は大文字小文字の区別を持たないので、小文字化しても同じテナントを指す
+  local url = base .. "/" .. tenant_id:lower()
   if path and path ~= "" then
     url = url .. "/" .. path
   end

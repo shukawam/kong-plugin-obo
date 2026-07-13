@@ -78,6 +78,23 @@ describe("obo: util.build_tenant_url (unit)", function()
       "https://login.microsoftonline.com/tenant-x/v2.0",
       util.build_tenant_url("https://login.microsoftonline.com///", "tenant-x", "v2.0"))
   end)
+
+  it("tenant_id を小文字に正規化する（Entra のメタデータ issuer は小文字 GUID を返すため）", function()
+    -- 大文字 GUID を設定しても、導出 issuer / メタデータ URL / トークンエンドポイントが
+    -- Entra の正規形（小文字 GUID）と一致するように、URL builder の入口で小文字化する。
+    -- 裏取り: login.microsoftonline.com は大文字 GUID でメタデータを要求しても
+    -- issuer 内の GUID を小文字で返す（実メタデータで確認済み）
+    assert.equal(
+      "https://login.microsoftonline.com/aaaabbbb-1111-2222-3333-444455556666/v2.0",
+      util.build_tenant_url("https://login.microsoftonline.com",
+                            "AAAABBBB-1111-2222-3333-444455556666", "v2.0"))
+  end)
+
+  it("base や tenant_id が文字列でなければ nil を返す（error() を投げない）", function()
+    assert.is_nil(util.build_tenant_url(nil, "tenant-x", "v2.0"))
+    assert.is_nil(util.build_tenant_url(12345, "tenant-x", "v2.0"))
+    assert.is_nil(util.build_tenant_url("https://login.microsoftonline.com", nil, "v2.0"))
+  end)
 end)
 
 describe("obo: util.url_scheme_authority (unit)", function()
