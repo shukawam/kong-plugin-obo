@@ -110,7 +110,13 @@ describe("obo: token_exchange (unit)", function()
     assert.equal(3269, res.expires_in)
   end)
 
-  it("Entra のエラー JSON（4xx）は status=401 のエラーとして返す", function()
+  -- エラー分類テーブル（docs/obo/03 / RFC 6749 §5.2 で裏取り。Issue #4）
+  -- ------------------------------------------------------------------
+  -- ユーザー側で解決可能なエラー（再認証・再対話で解消しうる）→ 401
+  -- ------------------------------------------------------------------
+
+  it("interaction_required（4xx）は status=401 + クレームチャレンジで返す", function()
+    -- 条件付きアクセス（MFA 等）。ユーザーの再対話が必要（docs/obo/03 のエラー例）
     mock_res = {
       status = 400,
       body = cjson.encode({
@@ -124,6 +130,168 @@ describe("obo: token_exchange (unit)", function()
     assert.equal(401, err.status)
     assert.equal("interaction_required", err.error)
     assert.is_string(err.claims)  -- クレームチャレンジは handler が WWW-Authenticate に載せる
+  end)
+
+  it("invalid_grant（4xx）は status=401（受信トークンが無効/期限切れ/失効）", function()
+    -- RFC 6749 §5.2: authorization grant（= assertion に入れた受信トークン）が
+    -- invalid/expired/revoked。ユーザーが新しいトークンを取り直せば解消する → 401
+    mock_res = {
+      status = 400,
+      body = cjson.encode({ error = "invalid_grant", error_description = "AADSTS50013: ..." }),
+    }
+    local res, err = token_exchange.exchange(conf, "t")
+    assert.is_nil(res)
+    assert.equal(401, err.status)
+    assert.equal("invalid_grant", err.error)
+  end)
+
+  -- ------------------------------------------------------------------
+  -- ゲートウェイの設定・プロトコル起因（再認証では解消しない）→ 500
+  -- ------------------------------------------------------------------
+
+  it("invalid_client（4xx）は status=500（GW のクレデンシャル設定ミス、ユーザーのトークン起因ではない）", function()
+    -- RFC 6749 §5.2: 「Client authentication failed」= プラグイン自身の
+    -- client_secret / client_assertion の設定不備。ユーザーに 401 を返すと
+    -- 「あなたのトークンが不正」と誤誘導し、内部の設定不備を外部に示唆する → 500
+    mock_res = {
+      status = 401,
+      body = cjson.encode({ error = "invalid_client", error_description = "AADSTS7000215: Invalid client secret" }),
+    }
+    local res, err = token_exchange.exchange(conf, "t")
+    assert.is_nil(res)
+    assert.equal(500, err.status)
+    assert.is_nil(err.claims)  -- 設定エラーではクレームチャレンジを載せない
+  end)
+
+  it("unauthorized_client（4xx）は status=500（この grant_type を許可されていない設定）", function()
+    mock_res = {
+      status = 400,
+      body = cjson.encode({ error = "unauthorized_client" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(500, err.status)
+  end)
+
+  it("invalid_scope（4xx）は status=500（conf.scopes の設定ミス）", function()
+    mock_res = {
+      status = 400,
+      body = cjson.encode({ error = "invalid_scope" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(500, err.status)
+  end)
+
+  it("unsupported_grant_type（4xx）は status=500（プロトコル/設定）", function()
+    mock_res = {
+      status = 400,
+      body = cjson.encode({ error = "unsupported_grant_type" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(500, err.status)
+  end)
+
+  it("invalid_request（4xx）は status=500（リクエスト構築の問題）", function()
+    mock_res = {
+      status = 400,
+      body = cjson.encode({ error = "invalid_request" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(500, err.status)
+  end)
+
+  it("許可リストにない未知の error は status=500（ユーザーのトークンを不当に不正扱いしない）", function()
+    mock_res = {
+      status = 400,
+      body = cjson.encode({ error = "some_future_unknown_error" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(500, err.status)
+  end)
+
+  -- ------------------------------------------------------------------
+  -- 一時的にサービス利用不可 → 503 + Retry-After
+  -- ------------------------------------------------------------------
+
+  it("HTTP 429 は status=503 + Retry-After 透過（body の error に依らない）", function()
+    -- レート制限。Entra が付けた Retry-After（delta-seconds）を透過する
+    mock_res = {
+      status = 429,
+      headers = { ["Retry-After"] = "30" },
+      body = cjson.encode({ error = "temporarily_unavailable" }),
+    }
+    local res, err = token_exchange.exchange(conf, "t")
+    assert.is_nil(res)
+    assert.equal(503, err.status)
+    assert.equal("30", err.retry_after)
+  end)
+
+  it("HTTP 429 で Retry-After ヘッダーが無ければ retry_after は nil", function()
+    mock_res = { status = 429, body = cjson.encode({ error = "rate_limited" }) }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(503, err.status)
+    assert.is_nil(err.retry_after)
+  end)
+
+  it("Retry-After が数字以外なら透過しない（ヘッダーインジェクション防止）", function()
+    mock_res = {
+      status = 429,
+      headers = { ["Retry-After"] = 'evil"\r\nSet-Cookie: x' },
+      body = cjson.encode({ error = "temporarily_unavailable" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(503, err.status)
+    assert.is_nil(err.retry_after)
+  end)
+
+  it("temporarily_unavailable（4xx body）は status=503", function()
+    -- RFC 6749 §4.1.2.1: 「一時的な過負荷またはメンテナンス」。再試行で解消しうる
+    mock_res = {
+      status = 400,
+      headers = { ["Retry-After"] = "5" },
+      body = cjson.encode({ error = "temporarily_unavailable" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(503, err.status)
+    assert.equal("5", err.retry_after)
+  end)
+
+  it("HTTP 5xx でもボディが temporarily_unavailable なら status=503 + Retry-After", function()
+    -- Entra 自身が一時的サービス不可を返す最も典型的な形（HTTP 503 + エラー JSON）。
+    -- 有効な Entra エラー JSON はプロキシ由来ではなく Entra 自身の応答である証拠なので、
+    -- HTTP 5xx でも error 文字列の分類（503 + Retry-After 透過）を優先する
+    mock_res = {
+      status = 503,
+      headers = { ["Retry-After"] = "120" },
+      body = cjson.encode({ error = "temporarily_unavailable" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(503, err.status)
+    assert.equal("120", err.retry_after)
+  end)
+
+  -- ------------------------------------------------------------------
+  -- IdP 側の障害 → 502
+  -- ------------------------------------------------------------------
+
+  it("error フィールドのない HTTP 5xx は status=502（IdP 側障害）", function()
+    -- Entra のエラー JSON でない 5xx（ゲートウェイ/プロキシ由来など）は IdP 側障害として 502
+    mock_res = {
+      status = 503,
+      body = cjson.encode({ message = "upstream connect error" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(502, err.status)
+  end)
+
+  it("HTTP 5xx で error が temporarily_unavailable 以外なら status=502", function()
+    -- server_error 等の 5xx エラー JSON は IdP 側障害として 502。
+    -- 401（ユーザー起因）/ 500（設定起因）の分類は 4xx にのみ適用する
+    mock_res = {
+      status = 500,
+      body = cjson.encode({ error = "server_error" }),
+    }
+    local _, err = token_exchange.exchange(conf, "t")
+    assert.equal(502, err.status)
   end)
 
   it("接続失敗は status=502 のエラーとして返す", function()

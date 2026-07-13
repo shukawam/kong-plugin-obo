@@ -118,6 +118,45 @@ describe("obo: handler (unit)", function()
     assert.equal(502, exited.status)
   end)
 
+  it("設定・プロトコル起因のエラー（invalid_client）は 500 で、内部設定情報を漏らさない", function()
+    -- Issue #4: invalid_client は GW のクレデンシャル設定ミス。ユーザーには汎用 500 のみ返し、
+    -- error 識別子や error_description をレスポンスに含めない（debug ログのみ）
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_cache_get = function()
+      return nil, { status = 500, error = "invalid_client",
+                    detail = "AADSTS7000215: Invalid client secret provided" }
+    end
+    handler:access(conf)
+    assert.equal(500, exited.status)
+    -- WWW-Authenticate を付けない（「あなたのトークンが不正」と誤誘導しない）
+    assert.is_nil(exited.headers["WWW-Authenticate"])
+    -- レスポンスボディに内部の error 識別子・設定情報が漏れていないこと
+    local body = tostring(exited.body.message)
+    assert.is_nil(body:find("invalid_client", 1, true))
+    assert.is_nil(body:find("client secret", 1, true))
+    assert.is_nil(body:find("AADSTS", 1, true))
+  end)
+
+  it("レート制限/一時的なサービス不可は 503 + Retry-After 透過", function()
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_cache_get = function()
+      return nil, { status = 503, error = "temporarily_unavailable", retry_after = "30" }
+    end
+    handler:access(conf)
+    assert.equal(503, exited.status)
+    assert.equal("30", exited.headers["Retry-After"])
+    -- 内部詳細を漏らさない
+    assert.is_nil(tostring(exited.body.message):find("temporarily_unavailable", 1, true))
+  end)
+
+  it("503 で Retry-After が無ければヘッダーを付けない", function()
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_cache_get = function() return nil, { status = 503, error = "temporarily_unavailable" } end
+    handler:access(conf)
+    assert.equal(503, exited.status)
+    assert.is_nil(exited.headers["Retry-After"])
+  end)
+
   it("受信トークンの検証が IdP 接続失敗（JWKS 取得不可）で失敗した場合も 502", function()
     -- jwt_validator.validate の 3 番目の戻り値が truthy な場合は
     -- 「トークンが不正」（401）ではなく「IdP に到達できない」（502）

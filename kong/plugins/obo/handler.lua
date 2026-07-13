@@ -88,9 +88,22 @@ function plugin:access(conf)
       return unauthorized("idp rejected the token exchange", www)
     end
 
+    if err.status == 503 then
+      -- レート制限 / 一時的なサービス不可（Issue #4）。Entra の Retry-After があれば透過する。
+      -- 内部の error 識別子・詳細はレスポンスに含めない（debug ログのみ）
+      local headers = {}
+      if err.retry_after then
+        headers["Retry-After"] = err.retry_after
+      end
+      return kong.response.exit(503, { message = "Service Unavailable" }, headers)
+    end
+
     if err.status == 502 then
       return kong.response.exit(502, { message = "Bad Gateway" })
     end
+
+    -- 設定・プロトコル起因（invalid_client 等）や想定外は汎用 500（Issue #4）。
+    -- WWW-Authenticate を付けず、内部の失敗理由をレスポンスに出さない（誤誘導・情報漏えい防止）
     return kong.response.exit(500, { message = "An unexpected error occurred" })
   end
 
