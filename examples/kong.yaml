@@ -1,34 +1,11 @@
 _format_version: "3.0"
 
 services:
-  # 配線確認専用の Service/Route。
-  # upstream は compose.yaml のローカル echo（wiring-check）で、実トークンは送らない。
-  # トークンなし / 不正なトークンで 401 が返ることの確認にのみ使う（docs/04 §2）。
-  - name: wiring-check-service
-    url: http://wiring-check:80
-    routes:
-      - name: wiring-check-route
-        paths:
-          - /wiring-check
-        protocols:
-          - http
-          - https
-        methods:
-          - GET
-        strip_path: true
-    plugins:
-      - name: obo
-        config:
-          tenant_id: ${{ env "DECK_TENANT_ID" }}
-          client_id: ${{ env "DECK_CLIENT_ID" }}
-          client_secret: ${{ env "DECK_CLIENT_SECRET" }}
-          scopes:
-            - ${{ env "DECK_SCOPE" }}
-          audience: ${{ env "DECK_AUDIENCE" }}
-
-  # 実トークンでの OBO 交換確認用の Service/Route。
+  # OBO 検証用の Service/Route。
   # upstream は token B の正規の audience である downstream API（.env の DECK_DOWNSTREAM_URL）。
-  # 実トークンを送ってよいのはこの Route だけ（docs/04 §4）。
+  # 実トークン（token B）が送られるのはこの downstream API だけ（docs/04）。
+  # トークンなし / 不正なトークンは obo プラグインが upstream 到達前に 401 で拒否するため、
+  # 配線確認（docs/04 §2）もこの Route で行う。
   - name: downstream-service
     url: ${{ env "DECK_DOWNSTREAM_URL" }}
     routes:
