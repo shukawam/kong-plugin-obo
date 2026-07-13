@@ -159,6 +159,82 @@ describe("obo: util.url_scheme_authority (unit)", function()
   end)
 end)
 
+-- ログ出力用の無害化関数のテスト（Issue #9）
+-- IdP（Entra ID）の error_description など、外部から来る文字列をそのまま debug ログに
+-- 出すと、CR/LF によるログインジェクションや、巨大文字列によるログ肥大化の恐れがある
+describe("obo: util.sanitize_log_value (unit)", function()
+  local util
+
+  setup(function()
+    util = require("kong.plugins.obo.util")
+  end)
+
+  teardown(function()
+    package.loaded["kong.plugins.obo.util"] = nil
+  end)
+
+  it("CR/LF を含む文字列は制御文字が取り除かれ 1 行になる", function()
+    local input = "AADSTS50079: some message\r\nTrace ID: abc\r\nInjected: fake log line"
+    local sanitized = util.sanitize_log_value(input)
+    assert.is_nil(sanitized:find("\r", 1, true))
+    assert.is_nil(sanitized:find("\n", 1, true))
+  end)
+
+  it("既定の上限（256文字）を超える文字列は切り詰められる", function()
+    local input = string.rep("x", 1000)
+    local sanitized = util.sanitize_log_value(input)
+    assert.is_true(#sanitized <= 256)
+  end)
+
+  it("max_len を指定すればその長さで切り詰められる", function()
+    local input = string.rep("y", 100)
+    local sanitized = util.sanitize_log_value(input, 10)
+    assert.is_true(#sanitized <= 10)
+  end)
+
+  it("NUL やタブなどその他の制御文字も除去される", function()
+    local input = "a\0b\tc\127d"
+    local sanitized = util.sanitize_log_value(input)
+    assert.is_nil(sanitized:find("\0", 1, true))
+    assert.is_nil(sanitized:find("\127", 1, true))
+  end)
+
+  it("文字列以外（nil・数値・テーブル）は空文字を返す", function()
+    assert.equal("", util.sanitize_log_value(nil))
+    assert.equal("", util.sanitize_log_value(12345))
+    assert.equal("", util.sanitize_log_value({}))
+  end)
+
+  it("制御文字も長大でもない通常の文字列はそのまま返す", function()
+    assert.equal("interaction_required", util.sanitize_log_value("interaction_required"))
+  end)
+
+  -- 切り詰めはバイト長ベースで行うため、上限がマルチバイト文字（UTF-8）の途中に
+  -- 当たると不完全なバイト列が末尾に残り、ログが文字化けする。切り詰め後に
+  -- 文字境界へ揃える処理を検証する（Entra の error_description はローカライズされて
+  -- 日本語等のマルチバイト文字を含むことがある）
+  it("256 バイト境界がマルチバイト文字の途中に当たる場合、文字境界まで戻して切り詰める", function()
+    -- 「あ」は UTF-8 で 3 バイト。100 文字 = 300 バイト。
+    -- 256 バイト目は 86 文字目（バイト位置 256-258）の先頭バイトに当たるため、
+    -- 単純なバイト切り詰めだと先頭バイト 1 個だけが末尾に残ってしまう
+    local input = string.rep("あ", 100)
+    local sanitized = util.sanitize_log_value(input)
+    assert.equal(string.rep("あ", 85), sanitized)  -- 85 文字 = 255 バイトで完結する
+  end)
+
+  it("max_len がマルチバイト文字の継続バイトの途中に当たる場合も文字境界に揃う", function()
+    -- 「あ」= E3 81 82, 「い」= E3 81 84。max_len=5 だと「い」の 2 バイト目で切れる
+    assert.equal("あ", util.sanitize_log_value("あいう", 5))
+    -- max_len=4 だと「い」の先頭バイトだけが残る（先頭バイトの除去も確認）
+    assert.equal("あ", util.sanitize_log_value("あいう", 4))
+  end)
+
+  it("上限がちょうど文字境界に一致する場合は完全な文字を削らない", function()
+    -- 2 文字 = 6 バイト。max_len=6 なら 2 文字ともそのまま残る
+    assert.equal("あい", util.sanitize_log_value("あいう", 6))
+  end)
+end)
+
 describe("obo: fixtures (unit)", function()
   it("jwt.make が作ったトークンをフィクスチャの公開鍵で検証できる", function()
     local pkey = require "resty.openssl.pkey"

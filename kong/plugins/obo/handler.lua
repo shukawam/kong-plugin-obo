@@ -11,6 +11,7 @@ local jwt_validator   = require "kong.plugins.obo.jwt_validator"
 local scope_validator = require "kong.plugins.obo.scope_validator"
 local token_exchange  = require "kong.plugins.obo.token_exchange"
 local token_cache     = require "kong.plugins.obo.token_cache"
+local util            = require "kong.plugins.obo.util"
 
 local plugin = {
   -- PRIORITY はプラグインの実行順序を決める（大きいほど先）。
@@ -45,7 +46,9 @@ end
 -- @param reason 内部ログ用の理由
 -- @param www_authenticate WWW-Authenticate ヘッダーの値（省略時は realm のみ）
 local function unauthorized(reason, www_authenticate)
-  kong.log.debug("obo: unauthorized: ", reason)
+  -- reason には受信 JWT のヘッダー値（alg 等、クライアント制御下）に由来する文字列が
+  -- 含まれることがあるため、ログに出す前に無害化する（Issue #9）
+  kong.log.debug("obo: unauthorized: ", util.sanitize_log_value(reason))
   return kong.response.exit(401, { message = "Unauthorized" }, {
     ["WWW-Authenticate"] = www_authenticate or 'Bearer realm="kong"',
   })
@@ -56,7 +59,9 @@ end
 -- §3 で 403 Forbidden を SHOULD としている。401（認証失敗）とは明確に区別する。
 -- 内部理由（どのスコープ/ロールが不足か）はレスポンスに含めず debug ログのみ。
 local function forbidden(reason)
-  kong.log.debug("obo: forbidden: ", reason)
+  -- reason は scope_validator が組み立てる内部文言だが、トークンのクレーム値
+  -- （クライアント制御下）が含まれ得るため、他のログと同じ方針で無害化する（Issue #9）
+  kong.log.debug("obo: forbidden: ", util.sanitize_log_value(reason))
   return kong.response.exit(403, { message = "Forbidden" }, {
     ["WWW-Authenticate"] = 'Bearer error="insufficient_scope"',
   })
@@ -76,7 +81,8 @@ function plugin:access(conf)
       -- 受信トークンではなく Entra ID（OpenID configuration / JWKS）への接続・応答が
       -- 原因の失敗。「トークンが不正」（401）ではなく「IdP に到達できない」（502）として扱う
       -- （docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）
-      kong.log.debug("obo: jwt validation failed due to upstream error: ", validate_err)
+      kong.log.debug("obo: jwt validation failed due to upstream error: ",
+                     util.sanitize_log_value(validate_err))
       return kong.response.exit(502, { message = "Bad Gateway" })
     end
     return unauthorized(validate_err, 'Bearer error="invalid_token"')
@@ -97,8 +103,14 @@ function plugin:access(conf)
 
   if not access_token then
     local err = type(exchange_err) == "table" and exchange_err or {}
-    kong.log.debug("obo: token exchange failed: ", err.error or "unknown",
-                   " ", err.detail or "")
+    -- err.detail（Entra の error_description）はユーザーの UPN・メールアドレス等の
+    -- PII を含み得るため、ログには一切出力しない（Issue #9。切り詰めでも先頭部分に
+    -- PII が残り得るため不十分）。トラブルシュートは error 識別子（OAuth エラーコード）と
+    -- trace_id / correlation_id を Microsoft サポートや Entra のサインインログと
+    -- 突合することで成立する。これらも外部由来の値なので念のため無害化してから出す
+    kong.log.debug("obo: token exchange failed: error=", util.sanitize_log_value(err.error or "unknown"),
+                   " trace_id=", util.sanitize_log_value(err.trace_id),
+                   " correlation_id=", util.sanitize_log_value(err.correlation_id))
 
     if err.status == 401 then
       -- Entra のエラーとクレームチャレンジは WWW-Authenticate で伝搬する（docs/obo/03）。

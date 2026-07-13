@@ -154,7 +154,16 @@ function M.exchange(conf, incoming_token)
       status = 503,
       error = "temporarily_unavailable",
       retry_after = safe_retry_after(res.headers),
-      detail = json.error_description,  -- 内部ログ専用。レスポンスに出さないこと
+      -- detail（error_description）はユーザーの UPN・メールアドレス等の PII を含み得る
+      -- ため、レスポンスにもログにも出さないこと（Issue #9）。呼び出し側の内部判定用に
+      -- のみフィールドとして保持する
+      detail = json.error_description,
+      -- trace_id / correlation_id は Entra のエラーレスポンスに含まれる追跡用 ID
+      -- （docs/obo/03 のエラー例参照）。error_description をログに出さない代わりに、
+      -- Microsoft サポート・Entra サインインログとの突合に使えるようこの 2 つを
+      -- err テーブルに個別に載せておく（Issue #9）
+      trace_id = type(json.trace_id) == "string" and json.trace_id or nil,
+      correlation_id = type(json.correlation_id) == "string" and json.correlation_id or nil,
     }
   end
 
@@ -170,7 +179,16 @@ function M.exchange(conf, incoming_token)
     local err = {
       status = status,
       error  = json.error,
-      detail = json.error_description,  -- 内部ログ専用。レスポンスに出さないこと
+      -- detail（error_description）はユーザーの UPN・メールアドレス等の PII を含み得る
+      -- ため、レスポンスにもログにも出さないこと（Issue #9）。呼び出し側の内部判定用に
+      -- のみフィールドとして保持する
+      detail = json.error_description,
+      -- trace_id / correlation_id は Entra のエラーレスポンスに含まれる追跡用 ID
+      -- （docs/obo/03 のエラー例参照）。error_description をログに出さない代わりに、
+      -- Microsoft サポート・Entra サインインログとの突合に使えるようこの 2 つを
+      -- err テーブルに個別に載せておく（Issue #9）
+      trace_id = type(json.trace_id) == "string" and json.trace_id or nil,
+      correlation_id = type(json.correlation_id) == "string" and json.correlation_id or nil,
     }
     if status == 401 then
       -- クレームチャレンジは 401 の場合のみ handler が WWW-Authenticate に載せる（docs/obo/03）

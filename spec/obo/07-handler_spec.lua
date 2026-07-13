@@ -7,6 +7,9 @@ describe("obo: handler (unit)", function()
   local conf
   -- kong.* モックが記録する状態
   local request_headers, upstream_headers, exited
+  -- kong.log.debug に渡された引数を 1 回の呼び出しごとに連結して記録する
+  -- （Issue #9: ログ無害化の検証のため、実際にログに渡された文字列を確認できるようにする）
+  local debug_logs
 
   -- 各テストで挙動を差し替えるモック関数
   local mock_validate, mock_exchange, mock_cache_get, mock_authorize
@@ -27,7 +30,19 @@ describe("obo: handler (unit)", function()
     }
 
     _G.kong = {
-      log = { debug = function() end, err = function() end },
+      log = {
+        debug = function(...)
+          -- kong.log.debug は複数引数を受け取り連結してログに出す。
+          -- テストでは全引数を tostring して 1 文字列にまとめ、後で検査できるようにする
+          local n = select("#", ...)
+          local parts = {}
+          for i = 1, n do
+            parts[i] = tostring(select(i, ...))
+          end
+          table.insert(debug_logs, table.concat(parts))
+        end,
+        err = function() end,
+      },
       request = {
         get_header = function(name) return request_headers[name] end,
       },
@@ -58,6 +73,7 @@ describe("obo: handler (unit)", function()
 
   before_each(function()
     request_headers, upstream_headers, exited = {}, {}, nil
+    debug_logs = {}
     conf = { audience = "test-client-id" }
     -- 既定のモック挙動: すべて成功
     mock_validate = function() return { sub = "user" } end
@@ -217,5 +233,67 @@ describe("obo: handler (unit)", function()
     -- 渡されたクロージャを呼ぶと exchange が実行されること
     local res = received_fn()
     assert.equal("exchanged-token", res.access_token)
+  end)
+
+  -- Issue #9: IdP エラー詳細（error_description 由来の detail）の debug ログ無害化。
+  -- 外部レビュー指摘により、detail は切り詰めではなく「一切ログに出さない」方針に変更
+  -- （切り詰めでは先頭部分に UPN / メールアドレス等の PII が残り得るため）
+  describe("ログの無害化（Issue #9）", function()
+    it("token exchange 失敗時、detail（error_description 由来）はログに一切出力されない", function()
+      request_headers["Authorization"] = "Bearer valid-token"
+      -- error_description には PII（ここでは UPN を模した文字列）が含まれ得る
+      local pii_detail = "AADSTS50079: user alice@contoso.example must enroll in MFA\r\n"
+          .. "Trace ID: abc\r\nInjected-Header: evil\r\n" .. string.rep("A", 1000)
+      mock_cache_get = function()
+        return nil, { status = 401, error = "interaction_required", detail = pii_detail }
+      end
+
+      handler:access(conf)
+
+      assert.equal(401, exited.status)
+      for _, line in ipairs(debug_logs) do
+        -- detail の内容（PII を含む断片）がどのログ行にも現れないこと
+        assert.is_nil(line:find("AADSTS50079", 1, true))
+        assert.is_nil(line:find("alice@contoso.example", 1, true))
+        -- 念のためログインジェクション対策（CR/LF なし・常識的な長さ）も維持されていること
+        assert.is_nil(line:find("\r", 1, true))
+        assert.is_nil(line:find("\n", 1, true))
+        assert.is_true(#line <= 512)
+      end
+    end)
+
+    it("token exchange 失敗時、trace_id / correlation_id がログに含まれる", function()
+      request_headers["Authorization"] = "Bearer valid-token"
+      mock_cache_get = function()
+        return nil, {
+          status = 401,
+          error = "interaction_required",
+          detail = "AADSTS50079: ...",
+          trace_id = "0000aaaa-11bb-cccc-dd22-eeeeee333333",
+          correlation_id = "aaaa0000-bb11-2222-33cc-444444dddddd",
+        }
+      end
+
+      handler:access(conf)
+
+      local joined = table.concat(debug_logs, " | ")
+      assert.is_truthy(joined:find("0000aaaa-11bb-cccc-dd22-eeeeee333333", 1, true))
+      assert.is_truthy(joined:find("aaaa0000-bb11-2222-33cc-444444dddddd", 1, true))
+    end)
+
+    it("受信トークン検証エラーの理由に CR/LF が含まれてもログは無害化される", function()
+      request_headers["Authorization"] = "Bearer bad-token"
+      mock_validate = function()
+        return nil, "signature verification failed\r\nInjected-Header: evil"
+      end
+
+      handler:access(conf)
+
+      assert.equal(401, exited.status)
+      for _, line in ipairs(debug_logs) do
+        assert.is_nil(line:find("\r", 1, true))
+        assert.is_nil(line:find("\n", 1, true))
+      end
+    end)
   end)
 end)
