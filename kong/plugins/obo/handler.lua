@@ -1,13 +1,16 @@
 -- obo プラグインのハンドラー（オーケストレーション）
 -- 処理の流れ（設計書 docs/superpowers/specs/2026-07-10-obo-plugin-design.md §1）:
---   ① Authorization ヘッダーから Bearer トークンを抽出
---   ② jwt_validator で検証（署名・iss・aud・exp・nbf）
---   ③ token_cache 経由で交換済みトークンを取得（ミス時は token_exchange が実行される）
---   ④ upstream への Authorization を交換後トークンに差し替え
+--   ①  Authorization ヘッダーから Bearer トークンを抽出
+--   ②  jwt_validator で認証（署名・iss・aud・exp・nbf）
+--   ②' scope_validator で認可（required_scopes / required_roles の scp / roles 検査。
+--       権限不足は 403 insufficient_scope、未設定なら検査なし）
+--   ③  token_cache 経由で交換済みトークンを取得（ミス時は token_exchange が実行される）
+--   ④  upstream への Authorization を交換後トークンに差し替え
 
-local jwt_validator  = require "kong.plugins.obo.jwt_validator"
-local token_exchange = require "kong.plugins.obo.token_exchange"
-local token_cache    = require "kong.plugins.obo.token_cache"
+local jwt_validator   = require "kong.plugins.obo.jwt_validator"
+local scope_validator = require "kong.plugins.obo.scope_validator"
+local token_exchange  = require "kong.plugins.obo.token_exchange"
+local token_cache     = require "kong.plugins.obo.token_cache"
 
 local plugin = {
   -- PRIORITY はプラグインの実行順序を決める（大きいほど先）。
@@ -48,6 +51,17 @@ local function unauthorized(reason, www_authenticate)
   })
 end
 
+-- 403 を返す共通処理（認証は成功したが権限が不足しているケース）。
+-- RFC 6750 §3.1 は「必要な権限より低いトークン」を insufficient_scope と定義し、
+-- §3 で 403 Forbidden を SHOULD としている。401（認証失敗）とは明確に区別する。
+-- 内部理由（どのスコープ/ロールが不足か）はレスポンスに含めず debug ログのみ。
+local function forbidden(reason)
+  kong.log.debug("obo: forbidden: ", reason)
+  return kong.response.exit(403, { message = "Forbidden" }, {
+    ["WWW-Authenticate"] = 'Bearer error="insufficient_scope"',
+  })
+end
+
 function plugin:access(conf)
   -- ① Bearer トークン抽出
   local token = extract_bearer_token()
@@ -66,6 +80,14 @@ function plugin:access(conf)
       return kong.response.exit(502, { message = "Bad Gateway" })
     end
     return unauthorized(validate_err, 'Bearer error="invalid_token"')
+  end
+
+  -- ②' 認可: required_scopes / required_roles を満たすか検査する。
+  --     トークンは正当だが権限が足りない場合は 401 ではなく 403 insufficient_scope。
+  --     required_* が未設定なら常に true（後方互換。認可を別プラグインに委ねる運用も可）
+  local authorized, authz_err = scope_validator.authorize(conf, claims)
+  if not authorized then
+    return forbidden(authz_err)
   end
 
   -- ③ 交換済みトークンの取得（キャッシュミス時のみ Entra ID へ交換リクエスト）

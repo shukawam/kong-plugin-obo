@@ -23,11 +23,12 @@ upstream へのリクエストの `Authorization` ヘッダーを token B に差
 処理の流れ:
 
 1. `Authorization: Bearer <token A>` から受信トークンを取り出す。
-2. JWKS を用いて受信トークンの署名・`iss`・`aud`・`exp`・`nbf` を検証する。
-3. 交換済みトークンのキャッシュを確認し、なければ Entra ID のトークンエンドポイントへ
+2. JWKS を用いて受信トークンの署名・`iss`・`aud`・`exp`・`nbf` を検証する（認証）。
+3. `required_scopes` / `required_roles` を設定している場合、受信トークンの `scp` / `roles` クレームが要件を満たすか検査する（認可）。満たさなければ `403`（`insufficient_scope`）で拒否し、トークン交換は行わない。未設定なら検査しない。
+4. 交換済みトークンのキャッシュを確認し、なければ Entra ID のトークンエンドポイントへ
    OBO リクエスト（`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
    `requested_token_use=on_behalf_of`）を送って token B を取得する。
-4. upstream へのリクエストの `Authorization` ヘッダーを `Bearer <token B>` に差し替える。
+5. upstream へのリクエストの `Authorization` ヘッダーを `Bearer <token B>` に差し替える。
    受信した token A をそのまま upstream に転送することはない。
 
 ## 2. 前提: Entra ID 側のアプリ登録
@@ -150,6 +151,8 @@ export KONG_PLUGINS=bundled,obo
 | `scopes` | array of string | 必須（最低 1 件） | - | 交換後トークンに要求するダウンストリーム API のスコープ。スペース区切りで `scope` パラメータに連結される。 |
 | `audience` | string | 必須 | - | 受信トークンの `aud` クレームの期待値（通常は `client_id` と同じ値）。 |
 | `issuer` | string | 任意 | - | 受信トークンの `iss` クレームの期待値。省略時は `identity_base_url` と `tenant_id` から `{identity_base_url}/{tenant_id}/v2.0` の形式で導出する。 |
+| `required_scopes` | array of string | 任意 | - | 受信トークンの `scp`（委任スコープ）クレームに含まれていなければならないスコープのリスト。設定すると、指定した全スコープを持たないトークンを `403`（`insufficient_scope`）で拒否する。`scp` はユーザートークンにのみ含まれるため、これを設定すると `scp` を持たない app-only / daemon トークンも拒否される。**未設定なら `scp` の検査は行わない**（下記の注記を参照）。 |
+| `required_roles` | array of string | 任意 | - | 受信トークンの `roles`（アプリロール）クレームに含まれていなければならないロールのリスト。設定すると、指定した全ロールを持たないトークンを `403` で拒否する。未設定なら検査しない。`roles` は app-only トークンにもユーザーの割当ロールにも現れるため、これのみ設定した場合も**非空の `scp` クレームの存在**を併せて要求し、`scp` を持たない app-only / ID トークンは `403` で拒否する（`scp` の値の照合はしない。OBO はユーザー委任トークン専用のため）。要素は app role の「Value」（空白を含められない）を指定する。 |
 | `identity_base_url` | url | 省略可 | `https://login.microsoftonline.com` | Entra ID のベース URL。通常は変更不要（ソブリンクラウドやテストで使用）。 |
 | `token_cache_enabled` | boolean | 省略可 | `true` | 交換済みトークンをキャッシュするか。 |
 | `cache_ttl_margin` | integer (`>= 0`) | 省略可 | `30` | キャッシュ TTL を `expires_in` から何秒差し引くか（期限ギリギリのトークンを使わないための余裕、秒）。 |
@@ -158,6 +161,16 @@ export KONG_PLUGINS=bundled,obo
 
 ※1 `client_auth_method = client_secret` のとき `client_secret` が必須（`entity_checks`）。
 ※2 `client_auth_method = private_key_jwt` のとき `private_key` と `certificate_thumbprint` の両方が必須（`entity_checks`）。
+
+> **認可（`required_scopes` / `required_roles`）についての注意**: これらを設定しない場合、
+> プラグインは受信トークンの `scp` / `roles` を一切検査しません（署名・`iss`・`aud`・`exp`・`nbf`
+> の**認証**のみを行います）。この場合、ルートへのアクセス認可は別のプラグイン（例: ACL や
+> OPA 連携）や downstream API 側で行ってください。特定の委任スコープを持つユーザートークンだけを
+> 通したい場合は `required_scopes` を設定してください（`scp` を持たない app-only トークンも
+> 併せて拒否されます）。権限不足のトークンは認証失敗（`401`）ではなく `403`（`insufficient_scope`,
+> [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) §3.1）で拒否されます。
+> なお、明示的な**空配列**（`required_scopes: []` 等）は「検査なし」ではなく**設定エラー**として
+> スキーマ検証で拒否されます（値の入れ忘れが認可スキップにつながるのを防ぐため。設定するなら 1 件以上必須）。
 
 ## 5. 設定例
 
@@ -226,6 +239,7 @@ services:
 | ステータス | 意味 |
 |---|---|
 | `401 Unauthorized` | `Authorization` ヘッダーがない/`Bearer` 形式でない、受信トークンの検証失敗（署名・`iss`・`aud`・`exp`・`nbf` 不一致）、または Entra ID がトークン交換を拒否した場合。`WWW-Authenticate` ヘッダーに、無害化した OAuth エラーコードと（Entra ID が返した場合）Base64 エンコードされたクレームチャレンジ（`claims`）を付与する。 |
+| `403 Forbidden` | トークンの**認証**は成功したが、`required_scopes` / `required_roles` で要求した委任スコープ（`scp`）・アプリロール（`roles`）を満たさない場合（権限不足）。`WWW-Authenticate: Bearer error="insufficient_scope"` を付与する（[RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) §3.1）。どのスコープ/ロールが不足したかはレスポンスに含めない。 |
 | `502 Bad Gateway` | Entra ID への到達性・応答に問題がある場合（OpenID configuration/JWKS の取得失敗、トークン交換リクエストでの IdP 側 5xx やネットワークエラーなど）。受信トークン自体の検証結果ではなく IdP 側の障害であることを示す。 |
 | `500 Internal Server Error` | 上記以外の想定外のエラー。 |
 
@@ -251,6 +265,9 @@ pongo down    # コンテナ停止
 - [Microsoft identity platform application authentication certificate credentials](https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials) — client assertion（`private_key_jwt`、PS256 / `x5t#S256`）の仕様
 - [Access tokens in the Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens) — 受信トークンの検証方法・署名鍵ロールオーバー
 - [OpenID Connect on the Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc) — OpenID configuration / JWKS エンドポイント
+- [Access token claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference) — `scp`（スペース区切りのスコープ文字列、ユーザートークンのみ）/ `roles`（文字列の配列）の形式
+- [Secure applications and APIs by validating claims](https://learn.microsoft.com/en-us/entra/identity-platform/claims-validation) — `scp` / `roles` による認可、`scp` 欠落（app-only / daemon / id_token）の扱い
+- [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) — Bearer トークンの `WWW-Authenticate` 応答と `insufficient_scope`（403）
 - [RFC 7521](https://datatracker.ietf.org/doc/html/rfc7521) / [RFC 7523](https://datatracker.ietf.org/doc/html/rfc7523) — jwt-bearer グラントと client assertion の土台仕様
 
 > **コード内コメントの `docs/obo/0X` 参照について**: ソースコードのコメントは、上記一次情報を

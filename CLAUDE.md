@@ -42,7 +42,9 @@ Microsoft Entra ID の On-Behalf-Of (OBO) フローを実現する Kong Gateway 
 kong/plugins/obo/
 ├── handler.lua           -- access フェーズのオーケストレーションのみ
 ├── schema.lua            -- 設定スキーマ（条件付き必須チェック含む）
-├── jwt_validator.lua     -- 受信 JWT の検証（JWKS 取得・署名・クレーム）→ docs/obo/05
+├── jwt_validator.lua     -- 受信 JWT の認証（JWKS 取得・署名・クレーム）→ docs/obo/05
+├── scope_validator.lua   -- 受信 JWT の認可（scp / roles と required_scopes / required_roles の照合、
+│                            権限不足は 403 insufficient_scope）→ docs/obo/05
 ├── client_assertion.lua  -- private_key_jwt 用アサーション生成（PS256 + x5t#S256）→ docs/obo/04
 ├── token_exchange.lua    -- Entra ID への OBO リクエスト → docs/obo/02, 03
 └── token_cache.lua       -- 交換済みトークンの kong.cache キャッシュ

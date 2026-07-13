@@ -73,6 +73,24 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         },
       }
 
+      -- 認可（required_scopes）系ルート: scp に access_as_user を要求する
+      local route3 = bp.routes:insert({ hosts = { "obo-scoped.example" } })
+      bp.plugins:insert {
+        name = PLUGIN_NAME,
+        route = { id = route3.id },
+        config = {
+          tenant_id = "test-tenant",
+          client_id = "test-client-id",
+          client_secret = "test-secret",
+          scopes = { "api://downstream/.default" },
+          audience = "test-client-id",
+          issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
+          identity_base_url = MOCK_IDP,
+          ssl_verify = false,
+          required_scopes = { "access_as_user" },
+        },
+      }
+
       assert(helpers.start_kong({
         database = strategy,
         -- モック IdP を含む自前テンプレートを使う
@@ -247,6 +265,43 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
       assert.response(r).has.status(401)
       local www = assert.response(r).has.header("WWW-Authenticate")
       assert.is_truthy(www:find("interaction_required", 1, true))
+    end)
+
+    it("required_scopes を満たすトークン（scp 一致）: 200 で交換される", function()
+      local token = jwt.make({ scp = "access_as_user Mail.Read", sub = "scoped-ok-user" })
+      local r = client:get("/request", {
+        headers = { host = "obo-scoped.example", authorization = "Bearer " .. token },
+      })
+      assert.response(r).has.status(200)
+      local auth = assert.request(r).has.header("authorization")
+      assert.equal("Bearer mock-exchanged-token", auth)
+    end)
+
+    it("required_scopes 不足（scp クレームなし）: 403 + insufficient_scope（IdP に送らない）", function()
+      -- scp を持たないトークン（＝ app-only 相当）。有効な署名・aud だが権限不足なので
+      -- 401 ではなく 403 insufficient_scope で拒否する。
+      -- 権限不足のトークンでトークン交換（IdP 呼び出し）が発生しないことも、
+      -- モック IdP のトークンエンドポイント呼び出し回数カウンタ（/_calls）で検証する。
+      -- sub を固有化する理由: token_cache のキーはトークン文字列由来のため、既定の
+      -- jwt.make() だと同一秒に生成された先行テストのトークンと完全一致し、
+      -- 「呼び出し回数が増えない」がキャッシュヒットで偶然成立してしまう可能性がある
+      local token = jwt.make({ sub = "scoped-denied-user" })
+      local http = require "resty.http"
+      local function token_calls()
+        local c = assert(http.new())
+        local res = assert(c:request_uri(MOCK_IDP .. "/_calls"))
+        return tonumber(res.body:match("%d+"))
+      end
+
+      local before = token_calls()
+      local r = client:get("/request", {
+        headers = { host = "obo-scoped.example", authorization = "Bearer " .. token },
+      })
+      assert.response(r).has.status(403)
+      local www = assert.response(r).has.header("WWW-Authenticate")
+      assert.is_truthy(www:find('error="insufficient_scope"', 1, true))
+      -- 403 の間、トークンエンドポイントは一度も呼ばれていないこと
+      assert.equal(before, token_calls())
     end)
 
     it("IdP に接続できない: 502", function()

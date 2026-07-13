@@ -9,12 +9,15 @@ describe("obo: handler (unit)", function()
   local request_headers, upstream_headers, exited
 
   -- 各テストで挙動を差し替えるモック関数
-  local mock_validate, mock_exchange, mock_cache_get
+  local mock_validate, mock_exchange, mock_cache_get, mock_authorize
 
   setup(function()
     -- 下位モジュールをモックとして先に登録する（handler の require より前）
     package.loaded["kong.plugins.obo.jwt_validator"] = {
       validate = function(...) return mock_validate(...) end,
+    }
+    package.loaded["kong.plugins.obo.scope_validator"] = {
+      authorize = function(...) return mock_authorize(...) end,
     }
     package.loaded["kong.plugins.obo.token_exchange"] = {
       exchange = function(...) return mock_exchange(...) end,
@@ -48,6 +51,7 @@ describe("obo: handler (unit)", function()
     _G.kong = nil
     package.loaded["kong.plugins.obo.handler"] = nil
     package.loaded["kong.plugins.obo.jwt_validator"] = nil
+    package.loaded["kong.plugins.obo.scope_validator"] = nil
     package.loaded["kong.plugins.obo.token_exchange"] = nil
     package.loaded["kong.plugins.obo.token_cache"] = nil
   end)
@@ -57,6 +61,7 @@ describe("obo: handler (unit)", function()
     conf = { audience = "test-client-id" }
     -- 既定のモック挙動: すべて成功
     mock_validate = function() return { sub = "user" } end
+    mock_authorize = function() return true end
     mock_cache_get = function(_, _, fn) return "exchanged-token" end
     mock_exchange = function() return { access_token = "exchanged-token", expires_in = 3600 } end
   end)
@@ -88,6 +93,37 @@ describe("obo: handler (unit)", function()
     assert.is_truthy(exited.headers["WWW-Authenticate"]:find('error="invalid_token"', 1, true))
     -- 内部の失敗理由がレスポンスボディに漏れていないこと（認証プラグインの鉄則）
     assert.is_nil(tostring(exited.body.message):find("signature", 1, true))
+  end)
+
+  it("認可失敗（scp/roles 不足）なら 403 + WWW-Authenticate error=insufficient_scope", function()
+    -- 有効なトークンだが required_scopes / required_roles を満たさない場合は
+    -- 認証失敗（401）ではなく「権限不足」= RFC 6750 の 403 insufficient_scope とする
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_authorize = function() return nil, "token is missing one or more required scopes" end
+    handler:access(conf)
+    assert.equal(403, exited.status)
+    assert.is_truthy(exited.headers["WWW-Authenticate"]:find('error="insufficient_scope"', 1, true))
+    -- 内部理由がレスポンスボディに漏れていないこと
+    assert.is_nil(tostring(exited.body.message):find("scope", 1, true))
+  end)
+
+  it("認可失敗時はトークン交換を行わない（権限不足のトークンで IdP を呼ばない）", function()
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_authorize = function() return nil, "token is missing one or more required roles" end
+    local exchange_called = false
+    mock_cache_get = function() exchange_called = true; return "t" end
+    handler:access(conf)
+    assert.equal(403, exited.status)
+    assert.is_false(exchange_called)
+  end)
+
+  it("認可は検証済みクレームを受け取る（validate の戻り値が authorize に渡る）", function()
+    request_headers["Authorization"] = "Bearer valid-token"
+    mock_validate = function() return { sub = "user", scp = "access_as_user" } end
+    local received_claims
+    mock_authorize = function(_, claims) received_claims = claims; return true end
+    handler:access(conf)
+    assert.equal("access_as_user", received_claims.scp)
   end)
 
   it("IdP がエラーを返したら 401 + Entra のエラー識別子を WWW-Authenticate に載せる", function()

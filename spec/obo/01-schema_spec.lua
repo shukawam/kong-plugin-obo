@@ -129,4 +129,89 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.cache_ttl_margin)
   end)
 
+  -- Issue #1: 受信トークンの scp / roles による認可（required_scopes / required_roles）
+  it("required_scopes に文字列の配列を指定できる", function()
+    local config = base_config()
+    config.required_scopes = { "access_as_user", "Files.Read" }
+    local ok, err = validate(config)
+    assert.is_nil(err)
+    assert.is_truthy(ok)
+  end)
+
+  it("required_roles に文字列の配列を指定できる", function()
+    local config = base_config()
+    config.required_roles = { "Task.Admin" }
+    local ok, err = validate(config)
+    assert.is_nil(err)
+    assert.is_truthy(ok)
+  end)
+
+  it("required_scopes / required_roles は省略できる（未設定＝後方互換で検査なし）", function()
+    local config = base_config()
+    config.required_scopes = nil
+    config.required_roles = nil
+    local ok = validate(config)
+    assert.is_truthy(ok)
+    -- 既定値のない optional 配列は、省略すると ngx.null（未設定）に正規化される。
+    -- scope_validator はこの ngx.null を「検査なし」として扱う必要がある
+    assert.equal(ngx.null, ok.config.required_scopes)
+    assert.equal(ngx.null, ok.config.required_roles)
+  end)
+
+  it("required_scopes の要素が文字列でないと拒否する", function()
+    local config = base_config()
+    config.required_scopes = { 123 }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_scopes の要素にスペースを含む文字列を拒否する（scp はスペース区切りのため絶対に一致しない）", function()
+    local config = base_config()
+    config.required_scopes = { "access_as_user Files.Read" }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_scopes の要素に空文字列を拒否する", function()
+    local config = base_config()
+    config.required_scopes = { "" }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_roles の要素にスペースを含む文字列を拒否する（app role の Value は空白不可のため絶対に一致しない）", function()
+    -- Entra ID の roles クレームに入るのは app role の「Value」であり、Value は
+    -- "The value can't contain spaces." と明記されている（空白を含められるのは Display name のみ）。
+    -- 出典: https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps
+    --       "Declare roles for an application" の Value 行。
+    -- よって空白入りの required_roles は恒常 403 になる設定ミスとして schema で弾く
+    local config = base_config()
+    config.required_roles = { "Task Admin Role" }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_roles)
+  end)
+
+  -- 外部レビュー指摘（fail-open 防止）: 「省略（未設定）は許可、明示的な空配列は拒否」。
+  -- テンプレートの値の入れ忘れ等で空配列だけが残ると認可が黙ってスキップされてしまうため、
+  -- 空配列は設定エラーとして schema の段階で弾く
+  it("required_scopes に明示的な空配列を指定すると拒否する", function()
+    local config = base_config()
+    config.required_scopes = {}
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_roles に明示的な空配列を指定すると拒否する", function()
+    local config = base_config()
+    config.required_roles = {}
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_roles)
+  end)
+
 end)
