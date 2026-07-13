@@ -26,6 +26,22 @@ local function make_token(claims_override)
   return jwt.make(claims_override)
 end
 
+-- JWT の署名部を「決定的に」壊すローカル関数。
+-- 以前の「末尾 2 文字を "xx" に置換する」方式は、署名がたまたま "xx" で終わると
+-- 改ざんが no-op になり（確率 ~1/4096）、テストが 200 を返して落ちるフレークがあった。
+-- また base64url の末尾 1 文字はパディングビットを含むため、末尾だけを変えても
+-- デコード後のバイト列が変わらないことがある。そこで署名セグメントの「先頭」1 文字を
+-- 現在の文字と必ず異なる文字（A でなければ A、A なら B）に置き換える。
+-- 先頭文字の 6 ビットは必ずデコード結果の第 1 バイトに寄与するので署名バイト列が確実に
+-- 変わり、置換文字も base64url アルファベット内なので改ざん後も base64url として妥当なまま
+local function tamper_signature(token)
+  local h, p, s = token:match("^([^.]+)%.([^.]+)%.([^.]+)$")
+  assert(s, "not a JWT: " .. tostring(token))
+  local first = s:sub(1, 1)
+  local replaced = (first == "A") and "B" or "A"
+  return h .. "." .. p .. "." .. replaced .. s:sub(2)
+end
+
 for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
   describe(PLUGIN_NAME .. ": (integration) [#" .. strategy .. "]", function()
     local client
@@ -209,8 +225,8 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
 
     it("モック IdP: client_assertion の署名が壊れていると 400", function()
       local assertion = jwt.make_assertion()
-      -- 署名部の末尾を書き換えて PS256 検証を失敗させる
-      local tampered = assertion:sub(1, -3) .. "xx"
+      -- 署名部を決定的に書き換えて PS256 検証を失敗させる（tamper_signature のコメント参照）
+      local tampered = tamper_signature(assertion)
       local res = post_token(pkjwt_body({ client_assertion = tampered }))
       assert.equal(400, res.status)
       assert.is_truthy(res.body:find("signature invalid", 1, true))
@@ -246,7 +262,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
 
     it("署名が不正なトークン: 401", function()
       local token = make_token()
-      local tampered = token:sub(1, -3) .. "xx"  -- 署名部分を壊す
+      local tampered = tamper_signature(token)  -- 署名部分を決定的に壊す
       local r = client:get("/request", {
         headers = { host = "obo.example", authorization = "Bearer " .. tampered },
       })

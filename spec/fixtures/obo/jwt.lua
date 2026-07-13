@@ -11,7 +11,8 @@ local M = {}
 
 -- 署名済みテスト JWT を作る
 -- @param claims_override 既定クレームを上書きするテーブル（例: { aud = "other" }）。
---                        値に cjson.null ではなく nil を入れたい場合は上書きではなく既定値を変えること
+--                        値に false を渡すとそのクレームを削除する
+--                        （例: exp = false で「exp クレーム欠落」の異常系トークンを作る）。
 -- @param header_override 既定ヘッダーを上書きするテーブル（kid 不一致などの異常系テスト用）
 -- @return JWT 文字列
 function M.make(claims_override, header_override)
@@ -26,7 +27,12 @@ function M.make(claims_override, header_override)
     nbf = now,
   }
   for k, v in pairs(claims_override or {}) do
-    claims[k] = v
+    -- header_override と同様に、false を渡すとそのキーを削除する
+    if v == false then
+      claims[k] = nil
+    else
+      claims[k] = v
+    end
   end
 
   local header = { alg = "RS256", typ = "JWT", kid = keys.kid }

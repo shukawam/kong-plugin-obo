@@ -101,6 +101,45 @@ describe("obo: handler (unit)", function()
     assert.equal(401, exited.status)
   end)
 
+  -- extract_bearer_token の正規表現 "^[Bb][Ee][Aa][Rr][Ee][Rr]%s+(%S+)%s*$" の揺れ受理を、
+  -- 実際に jwt_validator.validate へ渡されるトークン値を捕捉して検証する
+  -- （「拒否されない」だけでなく「正しいトークンが抽出される」ことまで確認する）
+  it("scheme が小文字 (bearer) でも受理し、正しいトークンを抽出する", function()
+    request_headers["Authorization"] = "bearer valid-token"
+    local captured_token
+    mock_validate = function(_, token) captured_token = token; return { sub = "user" } end
+    handler:access(conf)
+    assert.is_nil(exited)
+    assert.equal("valid-token", captured_token)
+  end)
+
+  it("scheme が大文字 (BEARER) でも受理し、正しいトークンを抽出する", function()
+    request_headers["Authorization"] = "BEARER valid-token"
+    local captured_token
+    mock_validate = function(_, token) captured_token = token; return { sub = "user" } end
+    handler:access(conf)
+    assert.is_nil(exited)
+    assert.equal("valid-token", captured_token)
+  end)
+
+  it("scheme とトークンの間に複数スペースがあっても受理し、正しいトークンを抽出する", function()
+    request_headers["Authorization"] = "Bearer    valid-token"
+    local captured_token
+    mock_validate = function(_, token) captured_token = token; return { sub = "user" } end
+    handler:access(conf)
+    assert.is_nil(exited)
+    assert.equal("valid-token", captured_token)
+  end)
+
+  it("トークンの後ろに末尾スペース（OWS）があっても受理し、正しいトークンを抽出する", function()
+    request_headers["Authorization"] = "Bearer valid-token   "
+    local captured_token
+    mock_validate = function(_, token) captured_token = token; return { sub = "user" } end
+    handler:access(conf)
+    assert.is_nil(exited)
+    assert.equal("valid-token", captured_token)
+  end)
+
   it("トークン検証失敗なら 401 + error=invalid_token、理由をレスポンスに含めない", function()
     request_headers["Authorization"] = "Bearer bad-token"
     mock_validate = function() return nil, "signature verification failed" end
@@ -150,6 +189,21 @@ describe("obo: handler (unit)", function()
     local www = exited.headers["WWW-Authenticate"]
     assert.is_truthy(www:find('error="interaction_required"', 1, true))
     assert.is_truthy(www:find("claims=", 1, true))  -- クレームチャレンジの伝搬（docs/obo/03）
+  end)
+
+  it("claims の値は元の JSON を正しく Base64 エンコードしたものである", function()
+    request_headers["Authorization"] = "Bearer valid-token"
+    local claims_json = '{"access_token":{"essential":true,"value":"X"}}'
+    mock_cache_get = function()
+      return nil, { status = 401, error = "interaction_required", claims = claims_json }
+    end
+    handler:access(conf)
+    assert.equal(401, exited.status)
+    local www = exited.headers["WWW-Authenticate"]
+    local b64 = www:match('claims="([^"]+)"')
+    assert.is_string(b64)
+    -- Base64 をデコードすると、handler に渡した元の JSON 文字列と完全一致するはず
+    assert.equal(claims_json, ngx.decode_base64(b64))
   end)
 
   it("IdP エラー識別子に不正な文字が含まれる場合はサニタイズされる", function()

@@ -224,6 +224,29 @@ describe("obo: token_cache (unit)", function()
     assert.equal(2, exchange_calls)
   end)
 
+  -- token_cache.lua の cache_failure 分岐: exchange_fn 自体は失敗していない
+  -- （呼ばれてすらいない）のに kong.cache:get が (nil, err) を返すケース
+  -- （mlcache のロック競合・共有辞書枯渇等、キャッシュ層自体の異常を模す）。
+  -- この場合は exchange_err が nil のまま token だけが nil になるので、
+  -- 専用の cache_failure エラーとして 500 を返す分岐に入るはず
+  it("キャッシュ層自体の異常（コールバックを介さない失敗）は cache_failure/500 として返る", function()
+    local original_get = kong.cache.get
+    kong.cache.get = function(_, _, _, _cb, ...)
+      -- コールバック（exchange_fn を包んだ関数）を一切呼ばずに失敗させる
+      return nil, "lock timeout"
+    end
+
+    local token, err = token_cache.get(conf, "incoming", ok_exchange("t", 3600))
+
+    kong.cache.get = original_get
+
+    assert.is_nil(token)
+    assert.equal(500, err.status)
+    assert.equal("cache_failure", err.error)
+    -- コールバックが呼ばれていない、つまり exchange_fn 自体は実行されていないこと
+    assert.equal(0, exchange_calls)
+  end)
+
   -- Issue #7: kong.cache は既定で期限切れ値を resurrect_ttl 秒（既定 30 秒）だけ
   -- 復活させる。resty.mlcache では resurrect_ttl は「stale 値を resurrect
   -- (復活) する猶予秒数」であり、そのまま lua_shared_dict の TTL としても使われる。
