@@ -2,7 +2,7 @@
 -- 仕様: docs/obo/05-token-validation.md
 --   1. OpenID configuration（v2.0）から jwks_uri を取得（kong.cache でキャッシュ）
 --   2. JWKS を取得し、トークンヘッダーの kid で公開鍵を選択
---      未知の kid はキャッシュを破棄して 1 回だけ再取得（鍵ロールオーバー追従）
+--      未知の kid は 1 回だけ再取得を試み、取得成功時のみキャッシュを置換（鍵ロールオーバー追従）
 --   3. RS256 署名検証
 --   4. クレーム検証: iss 完全一致 / aud 一致 / exp / nbf（クロックスキュー許容付き）
 
@@ -115,7 +115,8 @@ local function jwks_cache_key(conf)
 end
 
 -- kid に対応する JWK(JSON文字列) を返すローカル関数
--- 見つからない場合はキャッシュを破棄して 1 回だけ再取得する（鍵ロールオーバー対応）
+-- 見つからない場合は 1 回だけ再取得を試み、取得に成功したときのみキャッシュを置換する
+-- （鍵ロールオーバー対応。取得失敗時は既存の stale キャッシュを温存する。Issue #3）
 -- @return jwk_json, err, is_upstream_error
 --   is_upstream_error が true の場合、失敗理由は「受信トークンが不正」ではなく
 --   「Entra ID（OpenID configuration / JWKS）に接続できない、または応答が不正な形」であることを示す。
@@ -134,7 +135,7 @@ local function get_jwk_for_kid(conf, kid)
     return by_kid[kid]
   end
 
-  -- 未知 kid での無効化+再取得はワーカー単位で頻度制限する。
+  -- 未知 kid での再取得はワーカー単位で頻度制限する。
   -- 認証不要でここまで到達できるため、制限なしだと乱数 kid を送り続けるだけで
   -- 共有キャッシュ（cluster 全体）への無効化を連打できてしまう
   local now = ngx.time()
@@ -144,14 +145,25 @@ local function get_jwk_for_kid(conf, kid)
   end
   last_refetch[cache_key] = now
 
-  -- キャッシュが古い可能性があるので、無効化して取り直す
-  kong.cache:invalidate(cache_key)
-  by_kid, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
-  if not by_kid then
-    return nil, tostring(err), true
+  -- Issue #3: 「取得成功後に置換」方式。
+  -- 先に invalidate してから取り直すと、再取得が失敗したとき（IdP 一時断など）に
+  -- 本来まだ METADATA_TTL 有効だった正常な JWKS まで失い、以後の正当なトークンも
+  -- IdP 復旧まで 502 になる。そこで、まず load_jwks を直接呼んで新しい JWKS の取得を試み、
+  -- 成功した場合にのみ既存キャッシュを無効化して置換する（失敗時は stale キャッシュを温存する）。
+  local fresh, fresh_err = load_jwks(conf)
+  if not fresh then
+    -- 取得失敗: 既存キャッシュ（stale だが有効）を温存し、invalidate しない。
+    -- load_jwks の失敗は Entra ID への接続・応答形式の問題なので upstream エラーとして返す
+    return nil, tostring(fresh_err), true
   end
-  if by_kid[kid] then
-    return by_kid[kid]
+
+  -- 取得成功: 既存キャッシュを無効化し、取得済みの値で即座に再 populate する。
+  -- load_jwks を二度呼ばないよう、取得済み fresh をそのまま返すコールバックを渡す
+  kong.cache:invalidate(cache_key)
+  kong.cache:get(cache_key, { ttl = METADATA_TTL }, function() return fresh end)
+
+  if fresh[kid] then
+    return fresh[kid]
   end
   -- IdP には正常に接続できたが、この kid の鍵が存在しない
   -- （鍵ロールオーバーに追従できていない、または不正な kid を送ってきた）
