@@ -44,12 +44,23 @@ jobs:
         username: ${{ secrets.GHA_DOCKERHUB_PULL_USER }}
         password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUBLIC_TOKEN }}
 
-    - uses: Kong/kong-pongo-action@8a531d3257a52d64473bd2e1dccb0bc958f3f8f0 # v1.0.2
+    # kong-pongo はコミット SHA（タグ 2.27.0）で固定して直接 checkout する。
+    # Kong/kong-pongo-action を経由すると、その内部の actions/checkout@v3（可変参照）が
+    # 固定されないため、アクションを使わずワークフロー内で同等の手順を SHA 固定で行う。
+    - name: kong-pongo を取得する（SHA 固定）
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
-        # kong-pongo のバージョンをタグ 2.27.0 のコミット SHA に固定する
-        # （master 追従だと非固定参照になり、サプライチェーン対策の方針と不整合になるため）
-        pongo_version: 39cb70a1e331640cd2f6fb80c30a4aeca14867d1 # 2.27.0
-        kong_version: ${{ matrix.kongVersion }}
+        repository: Kong/kong-pongo
+        ref: 39cb70a1e331640cd2f6fb80c30a4aeca14867d1 # 2.27.0
+        path: kong-pongo
+
+    - name: pongo を PATH に通してテスト環境を起動する
+      run: |
+        ln -s "$GITHUB_WORKSPACE/kong-pongo/pongo.sh" "$GITHUB_WORKSPACE/kong-pongo/pongo"
+        echo "$GITHUB_WORKSPACE/kong-pongo" >> "$GITHUB_PATH"
+        echo "KONG_VERSION=${{ matrix.kongVersion }}" >> "$GITHUB_ENV"
+        KONG_VERSION="${{ matrix.kongVersion }}" "$GITHUB_WORKSPACE/kong-pongo/pongo" up
+        KONG_VERSION="${{ matrix.kongVersion }}" "$GITHUB_WORKSPACE/kong-pongo/pongo" build
 
     - run: pongo run -- --Xoutput "--color" --coverage ${{ matrix.pongoArgs }}
 
@@ -120,7 +131,8 @@ jobs:
             plugins:
               - name: obo
                 config:
-                  tenant_id: smoke-tenant
+                  # tenant_id は GUID 形式のダミー値にする（schema の形式制限が強化されても通るように）
+                  tenant_id: 00000000-0000-0000-0000-000000000001
                   client_id: smoke-client
                   client_secret: smoke-secret
                   scopes:
