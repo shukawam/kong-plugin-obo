@@ -17,9 +17,10 @@ local M = {}
 -- （GitHub Issue #7）。
 --
 -- 対策として resurrect_ttl を「実質的に無効化」したいが、そのまま 0 を渡すのは危険。
--- Lua では 0 は truthy（false/nil だけが falsy）であるため、mlcache 内部の
--- `not resurrect_ttl` という判定は 0 を「無効」と見なしてくれず、resurrect 処理自体は
--- 実行されてしまう。その上 mlcache は「TTL(この場合は resurrect_ttl) が 0」を
+-- Lua では 0 は truthy（false/nil だけが falsy）であるため、mlcache 内部の resurrect を
+-- スキップする判定 `if not went_stale or not resurrect_ttl`（値が stale でないか、
+-- resurrect_ttl が未指定かの論理和）のうち `not resurrect_ttl` 側は 0 を「無効」と
+-- 見なしてくれず、stale 時には resurrect 処理自体は実行されてしまう。その上 mlcache は「TTL(この場合は resurrect_ttl) が 0」を
 -- 「無期限（決して失効しない）」という別の意味で特別扱いするため、resurrect_ttl=0 を渡すと
 -- 一度 resurrect された stale 値がその後ずっと（ワーカーが再起動するまで）居座ってしまう、
 -- という既定の 30 秒より遥かに悪い結果になる（実 mlcache で動作検証済み）。
