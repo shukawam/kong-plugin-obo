@@ -235,24 +235,30 @@ describe("obo: handler (unit)", function()
     assert.equal("exchanged-token", res.access_token)
   end)
 
-  -- Issue #9: IdP エラー詳細（error_description 由来の detail）の debug ログ無害化
+  -- Issue #9: IdP エラー詳細（error_description 由来の detail）の debug ログ無害化。
+  -- 外部レビュー指摘により、detail は切り詰めではなく「一切ログに出さない」方針に変更
+  -- （切り詰めでは先頭部分に UPN / メールアドレス等の PII が残り得るため）
   describe("ログの無害化（Issue #9）", function()
-    it("token exchange 失敗時、detail に CR/LF や長大な文字列が含まれてもログは 1 行・上限長になる", function()
+    it("token exchange 失敗時、detail（error_description 由来）はログに一切出力されない", function()
       request_headers["Authorization"] = "Bearer valid-token"
-      local injected_detail = "AADSTS50079: real message\r\nTrace ID: abc\r\n"
-          .. "Injected-Header: evil\r\n" .. string.rep("A", 1000)
+      -- error_description には PII（ここでは UPN を模した文字列）が含まれ得る
+      local pii_detail = "AADSTS50079: user alice@contoso.example must enroll in MFA\r\n"
+          .. "Trace ID: abc\r\nInjected-Header: evil\r\n" .. string.rep("A", 1000)
       mock_cache_get = function()
-        return nil, { status = 401, error = "interaction_required", detail = injected_detail }
+        return nil, { status = 401, error = "interaction_required", detail = pii_detail }
       end
 
       handler:access(conf)
 
       assert.equal(401, exited.status)
-      -- 全ログ行を確認: どこにも CR/LF や、意図しない極端な長さの断片が残っていないこと
       for _, line in ipairs(debug_logs) do
+        -- detail の内容（PII を含む断片）がどのログ行にも現れないこと
+        assert.is_nil(line:find("AADSTS50079", 1, true))
+        assert.is_nil(line:find("alice@contoso.example", 1, true))
+        -- 念のためログインジェクション対策（CR/LF なし・常識的な長さ）も維持されていること
         assert.is_nil(line:find("\r", 1, true))
         assert.is_nil(line:find("\n", 1, true))
-        assert.is_true(#line <= 512)  -- 複数フィールドを連結しても常識的な長さに収まる
+        assert.is_true(#line <= 512)
       end
     end)
 

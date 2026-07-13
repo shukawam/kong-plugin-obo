@@ -59,7 +59,9 @@ end
 -- §3 で 403 Forbidden を SHOULD としている。401（認証失敗）とは明確に区別する。
 -- 内部理由（どのスコープ/ロールが不足か）はレスポンスに含めず debug ログのみ。
 local function forbidden(reason)
-  kong.log.debug("obo: forbidden: ", reason)
+  -- reason は scope_validator が組み立てる内部文言だが、トークンのクレーム値
+  -- （クライアント制御下）が含まれ得るため、他のログと同じ方針で無害化する（Issue #9）
+  kong.log.debug("obo: forbidden: ", util.sanitize_log_value(reason))
   return kong.response.exit(403, { message = "Forbidden" }, {
     ["WWW-Authenticate"] = 'Bearer error="insufficient_scope"',
   })
@@ -101,13 +103,14 @@ function plugin:access(conf)
 
   if not access_token then
     local err = type(exchange_err) == "table" and exchange_err or {}
-    -- err.detail（Entra の error_description）は PII や CR/LF を含みうる外部由来の文字列
-    -- なので、そのままログに出さず無害化する（Issue #9）。error 識別子・trace_id・
-    -- correlation_id は運用上の追跡に必要な情報なので detail とは別に個別にログへ載せる
+    -- err.detail（Entra の error_description）はユーザーの UPN・メールアドレス等の
+    -- PII を含み得るため、ログには一切出力しない（Issue #9。切り詰めでも先頭部分に
+    -- PII が残り得るため不十分）。トラブルシュートは error 識別子（OAuth エラーコード）と
+    -- trace_id / correlation_id を Microsoft サポートや Entra のサインインログと
+    -- 突合することで成立する。これらも外部由来の値なので念のため無害化してから出す
     kong.log.debug("obo: token exchange failed: error=", util.sanitize_log_value(err.error or "unknown"),
                    " trace_id=", util.sanitize_log_value(err.trace_id),
-                   " correlation_id=", util.sanitize_log_value(err.correlation_id),
-                   " detail=", util.sanitize_log_value(err.detail))
+                   " correlation_id=", util.sanitize_log_value(err.correlation_id))
 
     if err.status == 401 then
       -- Entra のエラーとクレームチャレンジは WWW-Authenticate で伝搬する（docs/obo/03）。
