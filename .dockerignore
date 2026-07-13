@@ -8,7 +8,8 @@ servroot*
 .claude/
 *.rock
 .env
-examples/
+# cluster 証明書をイメージレイヤーに焼き込まないこと（COPY . の対象から必ず外す）
+cluster-certs/
 compose.yaml
 README.md
 CLAUDE.md

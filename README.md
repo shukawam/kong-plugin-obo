@@ -76,8 +76,8 @@ cd kong-plugin-obo
 luarocks make
 ```
 
-コンテナ環境では、Kong 公式イメージをベースに上記を実行する Dockerfile を用意するのが
-一般的です。
+コンテナ環境向けには、リポジトリ同梱の [`Dockerfile`](./Dockerfile) がこの手順を実行します
+（「3.5 コンテナでの起動（Konnect データプレーン）」参照）。
 
 ### 3.3 プラグインの有効化
 
@@ -107,6 +107,47 @@ export KONG_PLUGINS=bundled,obo
     --data config.scopes[]=api://33333333-3333-3333-3333-333333333333/.default \
     --data config.audience=22222222-2222-2222-2222-222222222222
   ```
+
+### 3.5 コンテナでの起動（Konnect データプレーン）
+
+リポジトリ同梱の `compose.yaml` は、obo プラグイン入りの Kong Gateway を
+**Konnect のデータプレーン (DP)** として起動する構成です。upstream ダミーの echo サービスと
+Observability スタック（otel-lgtm）も含みます。
+
+前提として、Konnect（コントロールプレーン側）に以下の準備が必要です:
+
+1. **カスタムプラグインのスキーマ登録**: Gateway Manager → Plugins → New Plugin →
+   Custom Plugins から `kong/plugins/obo/schema.lua` をアップロードする。
+   登録しないと、CP から obo プラグインの設定を DP に配信できない。
+2. **DP 接続情報**: Gateway Manager で DP を作成し、cluster 証明書ペアを
+   `cluster-certs/cluster.crt` / `cluster-certs/cluster.key` に配置する
+   （`cluster-certs/` は gitignore / dockerignore 済み。コミット・イメージ焼き込み禁止）。
+
+起動手順:
+
+```bash
+# 1. 環境変数を用意する（PREFIX = Konnect の DP 接続プレフィックス）
+cp .env.example .env   # PREFIX と OBO_CLIENT_SECRET を記入
+
+# 2. ビルドして起動（Dockerfile が obo プラグインをインストールした DP イメージを作る）
+docker compose up --build
+```
+
+Konnect 側で Service（例: `http://echo:8080`）と Route を作り、obo プラグインを適用します。
+このとき `client_secret` には `{vault://env/obo-client-secret}` を指定すると、
+DP 上の環境変数 `OBO_CLIENT_SECRET`（`.env` から注入）で解決され、
+シークレットを Konnect 側に保存せずに済みます。
+
+検証: Entra ID からユーザーのアクセストークン（aud = middle-tier アプリ）を取得して
+
+```bash
+curl -H "Authorization: Bearer <token A>" http://localhost:8000/<route-path>
+```
+
+echo のレスポンス JSON の `headers.authorization` が受信トークンと**異なる値**
+（交換後の token B）になっていれば OBO 交換は成功です。トークンなしなら `401` +
+`WWW-Authenticate` が返ります。切り分けには `compose.yaml` の `KONG_LOG_LEVEL: debug`
+（設定済み）のログを `docker compose logs kong` で確認してください。
 
 ## 4. 設定リファレンス
 

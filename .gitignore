@@ -17,3 +17,9 @@ luacov.report.html
 # docs/ はローカル専用（仕様書・設計書・実装計画を保持、コミットしない）
 docs/
 .superpowers/
+
+# ローカル検証用の実値ファイル（example のみコミットする）
+.env
+
+# Konnect データプレーンの cluster 証明書・秘密鍵（絶対にコミットしない）
+cluster-certs/
