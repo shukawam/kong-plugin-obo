@@ -15,8 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # サプライチェーン攻撃対策としてアクションはコミット SHA で固定する（コメントは対応するバージョン）
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
     - name: LuaCheck linter
-      uses: lunarmodules/luacheck@master
+      uses: lunarmodules/luacheck@cc089e3f65acdd1ef8716cc73a3eca24a6b845e4 # v1.2.0
