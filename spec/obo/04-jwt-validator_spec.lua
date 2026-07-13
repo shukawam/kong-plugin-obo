@@ -224,7 +224,8 @@ describe("obo: jwt_validator (unit)", function()
 
   -- Fix 1: 未知 kid による JWKS 再取得のデバウンス。
   -- kong.cache のモックは素通し（毎回コールバック実行）のため、実キャッシュの有無に関わらず
-  -- 「無効化 + 再取得」のもう一往復が抑止されることを HTTP 呼び出し回数の差分で検証する。
+  -- 未知 kid 時の「load_jwks 直接呼びによる再取得」のもう一往復が抑止されることを
+  -- HTTP 呼び出し回数の差分で検証する。
   -- last_refetch はモジュール state なので、他テストの影響を受けないよう describe 内で
   -- 都度モジュールを再 require してリセットする
   describe("未知 kid の再取得デバウンス", function()
@@ -233,7 +234,7 @@ describe("obo: jwt_validator (unit)", function()
       jwt_validator = require("kong.plugins.obo.jwt_validator")
     end)
 
-    it("同一ワーカー内で連続する未知 kid は 2 回目の再取得（無効化+再取得）を抑止する", function()
+    it("同一ワーカー内で連続する未知 kid は 2 回目の再取得を抑止する", function()
       local token = jwt.make(nil, { kid = "unknown-key" })
 
       local claims1, err1 = jwt_validator.validate(conf, token)
@@ -247,8 +248,10 @@ describe("obo: jwt_validator (unit)", function()
       local calls_after_second = http_call_count
 
       -- kong.cache モックは素通し（毎回コールバック実行）なので、1 回の validate で
-      -- 「通常の取得」と「無効化後の再取得」の 2 往復（openid-config + jwks 各 2 回）= 4 回になる。
-      -- デバウンスされていれば 2 回目は「通常の取得」の 2 回だけで、再取得の 2 回は発生しない。
+      -- 「kong.cache:get 経由の通常取得」と「未知 kid 検出後の load_jwks 直接呼びによる再取得」の
+      -- 2 往復（openid-config + jwks 各 2 回）= 4 回になる。
+      -- デバウンスされていれば 2 回目の validate は「通常取得」の 2 回だけで、
+      -- load_jwks 直接呼び（再取得）の 2 回は発生しない。
       assert.equal(4, calls_after_first)
       assert.equal(2, calls_after_second - calls_after_first)
     end)
@@ -294,6 +297,10 @@ describe("obo: jwt_validator (unit)", function()
     after_each(function()
       -- 他テストに影響しないよう素通しモックへ戻す
       _G.kong.cache = orig_cache
+      -- この describe 内のテストで進んだ last_refetch（モジュール state）を持ち越さないよう、
+      -- モジュールも再 require して初期状態へ復元する（後続テスト追加時の前提を保つ衛生策）
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
     end)
 
     it("再取得で新しい鍵を取得できればロールオーバー後のトークンを検証成功する", function()

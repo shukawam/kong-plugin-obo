@@ -150,6 +150,12 @@ local function get_jwk_for_kid(conf, kid)
   -- 本来まだ METADATA_TTL 有効だった正常な JWKS まで失い、以後の正当なトークンも
   -- IdP 復旧まで 502 になる。そこで、まず load_jwks を直接呼んで新しい JWKS の取得を試み、
   -- 成功した場合にのみ既存キャッシュを無効化して置換する（失敗時は stale キャッシュを温存する）。
+  --
+  -- マルチワーカー時のトレードオフ（意図したもの）: load_jwks の直接呼びは kong.cache
+  -- （mlcache）のロックを経由しないため、複数ワーカーに未知 kid が同時到達すると
+  -- 最大ワーカー数分のフェッチが並行しうる。ワーカー単位の 30 秒デバウンス
+  -- （JWKS_REFETCH_INTERVAL）で頻度は抑えられるため実害は限定的であり、
+  -- 「取得成功後に置換」による可用性（stale 温存）を優先している。
   local fresh, fresh_err = load_jwks(conf)
   if not fresh then
     -- 取得失敗: 既存キャッシュ（stale だが有効）を温存し、invalidate しない。
