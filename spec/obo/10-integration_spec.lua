@@ -8,8 +8,12 @@ local keys = require "spec.fixtures.obo.keys"
 
 local PLUGIN_NAME = "obo"
 local MOCK_IDP = "http://127.0.0.1:10999"
+-- スキーマが tenant_id を GUID に限定するため、統合テストの設定も GUID を使う。
+-- 受信トークンの iss（jwt.make の既定 = login.microsoftonline.com/.../v2.0）は
+-- テスト固定値なので conf.issuer で明示的に合わせる（identity_base_url はモックに向ける）。
+local TENANT_ID = "11111111-1111-1111-1111-111111111111"
 -- モック IdP のトークンエンドポイント（direct probe で使う）
-local MOCK_TOKEN_URL = MOCK_IDP .. "/test-tenant/oauth2/v2.0/token"
+local MOCK_TOKEN_URL = MOCK_IDP .. "/" .. TENANT_ID .. "/oauth2/v2.0/token"
 
 for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
   describe(PLUGIN_NAME .. ": (integration) [#" .. strategy .. "]", function()
@@ -24,7 +28,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         name = PLUGIN_NAME,
         route = { id = route1.id },
         config = {
-          tenant_id = "test-tenant",
+          tenant_id = TENANT_ID,
           client_id = "test-client-id",
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
@@ -42,7 +46,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         name = PLUGIN_NAME,
         route = { id = route3.id },
         config = {
-          tenant_id = "test-tenant",
+          tenant_id = TENANT_ID,
           client_id = "test-client-id",
           -- client_secret ではなく秘密鍵署名の client assertion を使う
           client_auth_method = "private_key_jwt",
@@ -62,7 +66,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         name = PLUGIN_NAME,
         route = { id = route2.id },
         config = {
-          tenant_id = "test-tenant",
+          tenant_id = TENANT_ID,
           client_id = "test-client-id",
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
@@ -79,7 +83,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         name = PLUGIN_NAME,
         route = { id = route3.id },
         config = {
-          tenant_id = "test-tenant",
+          tenant_id = TENANT_ID,
           client_id = "test-client-id",
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },

@@ -50,6 +50,35 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.tenant_id)
   end)
 
+  it("tenant_id が GUID 形式でないと拒否する（単一テナント前提）", function()
+    -- ドメイン名（contoso.onmicrosoft.com）や common/organizations、任意文字列は
+    -- URL パスにそのまま連結されるため、GUID 以外は設定段階で拒否する
+    for _, bad in ipairs({
+      "contoso.onmicrosoft.com",
+      "common",
+      "organizations",
+      "test-tenant",
+      "11111111-2222-3333-4444-55555555555",   -- 末尾 1 桁不足
+      "11111111-2222-3333-4444-5555555555555",  -- 末尾 1 桁過剰
+      "gggggggg-2222-3333-4444-555555555555",   -- 非 16 進
+      "11111111222233334444555555555555",       -- ハイフンなし
+    }) do
+      local config = base_config()
+      config.tenant_id = bad
+      local ok, err = validate(config)
+      assert.is_falsy(ok, "should reject tenant_id=" .. bad)
+      assert.is_truthy(err.config.tenant_id)
+    end
+  end)
+
+  it("大文字を含む GUID の tenant_id を受け入れる", function()
+    local config = base_config()
+    config.tenant_id = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+    local ok, err = validate(config)
+    assert.is_nil(err)
+    assert.is_truthy(ok)
+  end)
+
   it("client_id がないと拒否する", function()
     local config = base_config()
     config.client_id = nil

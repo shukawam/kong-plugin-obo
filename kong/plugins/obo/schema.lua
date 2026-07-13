@@ -3,6 +3,14 @@ local typedefs = require "kong.db.schema.typedefs"
 -- プラグイン名。ディレクトリ名（kong/plugins/obo）と一致している必要がある
 local PLUGIN_NAME = "obo"
 
+-- tenant_id は URL パス（メタデータ / トークンエンドポイント / issuer）にそのまま連結される。
+-- 本プラグインは単一テナント前提のため、ドメイン名（contoso.onmicrosoft.com）や
+-- common / organizations ではなく GUID のみを許可する。ドメイン名を許可すると、
+-- メタデータが返す正規化済み GUID issuer との突き合わせが別途必要になり複雑化する
+-- （docs/obo/05「Validate the issuer」）。8-4-4-4-12 桁の 16 進（大文字小文字問わず）。
+local TENANT_ID_GUID_PATTERN =
+  "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+
 local schema = {
   name = PLUGIN_NAME,
   fields = {
@@ -13,8 +21,10 @@ local schema = {
     { config = {
         type = "record",
         fields = {
-          -- Entra ID のテナント ID（GUID）。トークンエンドポイントと issuer の導出に使う
-          { tenant_id = { type = "string", required = true } },
+          -- Entra ID のテナント ID（GUID）。トークンエンドポイントと issuer の導出に使う。
+          -- 単一テナント前提のため GUID 形式のみ許可する（match で検証）
+          { tenant_id = { type = "string", required = true,
+              match = TENANT_ID_GUID_PATTERN } },
 
           -- middle-tier（このゲートウェイ）として登録したアプリのクライアント ID
           { client_id = { type = "string", required = true } },
