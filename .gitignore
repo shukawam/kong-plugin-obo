@@ -25,3 +25,6 @@ docs/superpowers/
 
 # Konnect データプレーンの cluster 証明書・秘密鍵（絶対にコミットしない）
 cluster-certs/
+
+# git worktree 用ディレクトリ（ローカル専用）
+.worktrees/
