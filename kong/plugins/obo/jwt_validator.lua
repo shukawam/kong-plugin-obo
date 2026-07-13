@@ -26,6 +26,12 @@ local METADATA_TTL = 3600
 local JWKS_REFETCH_INTERVAL = 30  -- 秒
 local last_refetch = {}  -- jwks_cache_key -> ngx.time() of last refetch
 
+-- 直近の再取得が upstream 起因（IdP 到達不能・応答異常・キャッシュ層異常）で失敗したかを
+-- キー単位で覚えておくワーカーローカルのフラグ（Medium 2 対応）。
+-- 抑止期間中に来た未知 kid を「トークン不正（401）」と「IdP 障害の継続（502）」の
+-- どちらに分類するかの判断に使う。直前の再取得が失敗していれば障害継続とみなす
+local last_refetch_failed = {}  -- jwks_cache_key -> true（直近の再取得が失敗）
+
 -- JWT 文字列を分解して header / payload / signature を取り出すローカル関数
 -- @return { header, payload, signature, signing_input } のテーブル。不正なら nil とエラー
 local function decode_jwt(token)
@@ -141,32 +147,43 @@ local function get_jwk_for_kid(conf, kid)
   local now = ngx.time()
   local last = last_refetch[cache_key]
   if last and (now - last) < JWKS_REFETCH_INTERVAL then
+    -- 直前の再取得が失敗している場合、この抑止期間中は同じ IdP 障害が続いている
+    -- 可能性が高い。「kid が見つからない」（401 相当）ではなく upstream エラー
+    -- （502 相当）として分類し、クライアントに誤ったシグナルを返さない
+    if last_refetch_failed[cache_key] then
+      return nil, "JWKS refetch recently failed (refetch suppressed)", true
+    end
     return nil, "no key found in JWKS for kid (refetch suppressed)"
   end
   last_refetch[cache_key] = now
 
-  -- Issue #3: 「取得成功後に置換」方式。
-  -- 先に invalidate してから取り直すと、再取得が失敗したとき（IdP 一時断など）に
+  -- Issue #3: 「取得成功後に置換」方式。kong.cache:renew を使う。
+  -- 先に invalidate してから取り直す方式だと、再取得が失敗したとき（IdP 一時断など）に
   -- 本来まだ METADATA_TTL 有効だった正常な JWKS まで失い、以後の正当なトークンも
-  -- IdP 復旧まで 502 になる。そこで、まず load_jwks を直接呼んで新しい JWKS の取得を試み、
-  -- 成功した場合にのみ既存キャッシュを無効化して置換する（失敗時は stale キャッシュを温存する）。
+  -- IdP 復旧まで 502 になる。renew はこの問題を仕組みとして解決する。
   --
-  -- マルチワーカー時のトレードオフ（意図したもの）: load_jwks の直接呼びは kong.cache
-  -- （mlcache）のロックを経由しないため、複数ワーカーに未知 kid が同時到達すると
-  -- 最大ワーカー数分のフェッチが並行しうる。ワーカー単位の 30 秒デバウンス
-  -- （JWKS_REFETCH_INTERVAL）で頻度は抑えられるため実害は限定的であり、
-  -- 「取得成功後に置換」による可用性（stale 温存）を優先している。
-  local fresh, fresh_err = load_jwks(conf)
+  -- renew の実装根拠（Kong 3.9.2 / 3.14.0.7 のコンテナ内ソースで裏取り済み。
+  -- kong/cache/init.lua と kong/resty/mlcache/init.lua）:
+  --   * コールバック（load_jwks）は get の L3 コールバックと同じキー単位ロックの中で
+  --     実行される。同一ノード内で複数ワーカーに未知 kid が同時到達しても取得は直列化され、
+  --     待機中に他ワーカーが更新済みならバージョン比較でコールバック自体をスキップする。
+  --   * コールバックが失敗（nil, err）した場合は shm に一切書き込まず err を返す。
+  --     つまり既存の stale キャッシュはロック下で温存される（delete → set の隙間がない）。
+  --   * 成功時はロック下で shm を新値に置換し、ノード内ワーカーへの IPC のみ配信する。
+  --     クラスタイベント（cluster_events:broadcast）は使わないため、他ノードの正常な
+  --     キャッシュを消すことがない（他ノードは各自の未知 kid 検出時に各自 renew する）。
+  --     クラスタ全体へ無効化を配信する kong.cache:invalidate はここでは使ってはならない。
+  local fresh, renew_err = kong.cache:renew(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
   if not fresh then
-    -- 取得失敗: 既存キャッシュ（stale だが有効）を温存し、invalidate しない。
-    -- load_jwks の失敗は Entra ID への接続・応答形式の問題なので upstream エラーとして返す
-    return nil, tostring(fresh_err), true
+    -- 再取得失敗: 既存キャッシュ（stale だが有効）は renew が温存している。
+    -- 失敗理由は Entra ID への接続・応答形式の問題、またはキャッシュ層の書き込み異常で
+    -- あり、いずれも受信トークンの不正ではないので upstream エラーとして返す。
+    -- 続く抑止期間中の未知 kid も同じ分類にできるよう、失敗をキー単位で記録する
+    last_refetch_failed[cache_key] = true
+    return nil, tostring(renew_err), true
   end
-
-  -- 取得成功: 既存キャッシュを無効化し、取得済みの値で即座に再 populate する。
-  -- load_jwks を二度呼ばないよう、取得済み fresh をそのまま返すコールバックを渡す
-  kong.cache:invalidate(cache_key)
-  kong.cache:get(cache_key, { ttl = METADATA_TTL }, function() return fresh end)
+  -- 再取得成功: 失敗フラグを解除する（以後の抑止期間中の未知 kid は 401 分類に戻る）
+  last_refetch_failed[cache_key] = nil
 
   if fresh[kid] then
     return fresh[kid]

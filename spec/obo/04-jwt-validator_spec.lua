@@ -34,10 +34,13 @@ describe("obo: jwt_validator (unit)", function()
     }
 
     -- kong.cache のモック: 素通し（毎回コールバックを実行）
+    -- renew は Kong 3.9+ の実 API（kong/cache/init.lua）。成功時のみ値を置換するが、
+    -- 素通しモックでは get と同様にコールバック結果をそのまま返せば十分
     _G.kong = {
       log = { debug = function() end, err = function() end, warn = function() end },
       cache = {
         get = function(_, _, _, cb, ...) return cb(...) end,
+        renew = function(_, _, _, cb, ...) return cb(...) end,
         invalidate = function() end,
       },
     }
@@ -224,7 +227,7 @@ describe("obo: jwt_validator (unit)", function()
 
   -- Fix 1: 未知 kid による JWKS 再取得のデバウンス。
   -- kong.cache のモックは素通し（毎回コールバック実行）のため、実キャッシュの有無に関わらず
-  -- 未知 kid 時の「load_jwks 直接呼びによる再取得」のもう一往復が抑止されることを
+  -- 未知 kid 時の「renew（kong.cache:renew）経由の再取得」のもう一往復が抑止されることを
   -- HTTP 呼び出し回数の差分で検証する。
   -- last_refetch はモジュール state なので、他テストの影響を受けないよう describe 内で
   -- 都度モジュールを再 require してリセットする
@@ -248,10 +251,10 @@ describe("obo: jwt_validator (unit)", function()
       local calls_after_second = http_call_count
 
       -- kong.cache モックは素通し（毎回コールバック実行）なので、1 回の validate で
-      -- 「kong.cache:get 経由の通常取得」と「未知 kid 検出後の load_jwks 直接呼びによる再取得」の
+      -- 「kong.cache:get 経由の通常取得」と「未知 kid 検出後の kong.cache:renew 経由の再取得」の
       -- 2 往復（openid-config + jwks 各 2 回）= 4 回になる。
       -- デバウンスされていれば 2 回目の validate は「通常取得」の 2 回だけで、
-      -- load_jwks 直接呼び（再取得）の 2 回は発生しない。
+      -- renew（再取得）の 2 回は発生しない。
       assert.equal(4, calls_after_first)
       assert.equal(2, calls_after_second - calls_after_first)
     end)
@@ -280,6 +283,17 @@ describe("obo: jwt_validator (unit)", function()
           if cache_store[key] ~= nil then
             return cache_store[key]
           end
+          local v, err = cb(...)
+          if v == nil then
+            return nil, err
+          end
+          cache_store[key] = v
+          return v
+        end,
+        -- renew: Kong 3.9+ の実 API（kong/cache/init.lua → mlcache:renew）と同じ契約を模す。
+        -- コールバックを必ず実行し、成功時のみ既存値を置換する。失敗時は既存値に触れず
+        -- nil, err を返す（実 mlcache はロック下で shm へ書かずに返す）
+        renew = function(_, key, _, cb, ...)
           local v, err = cb(...)
           if v == nil then
             return nil, err
@@ -326,8 +340,9 @@ describe("obo: jwt_validator (unit)", function()
       assert.is_nil(err)
       assert.is_truthy(claims)
       assert.equal("test-user", claims.sub)
-      -- 取得成功時は既存キャッシュを新 JWKS に置換している
-      assert.equal(1, invalidate_count)
+      -- 置換は renew（成功時のみ上書き）で行われ、クラスタ全体へ無効化イベントを配信する
+      -- invalidate は一切呼ばれない（他ノードの正常キャッシュを消さないため）
+      assert.equal(0, invalidate_count)
 
       -- 置換後は新 kid がキャッシュ済みなので、以後の同 kid は再取得せずに検証できる
       local calls_before = http_call_count
@@ -359,6 +374,76 @@ describe("obo: jwt_validator (unit)", function()
       local claims2, err2 = jwt_validator.validate(conf, jwt.make())
       assert.is_nil(err2)
       assert.is_truthy(claims2)
+    end)
+
+    it("再投入（renew の書き込み）が失敗しても既存の JWKS キャッシュを失わない", function()
+      -- まず正常なトークンで JWKS（旧鍵 test-key-1）をキャッシュに載せる
+      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+
+      -- renew を「取得（コールバック）は成功するが、キャッシュへの書き込みで失敗する」
+      -- ケースに差し替える（実 mlcache では shm 書き込み失敗時に既存値へ触れず err を返す）
+      _G.kong.cache.renew = function(_, _, _, cb, ...)
+        local v, err = cb(...)
+        if v == nil then
+          return nil, err
+        end
+        return nil, "failed to renew key in node cache: could not write to lua_shared_dict"
+      end
+
+      -- 未知 kid → 再取得は成功するが再投入に失敗する
+      local claims, err, is_upstream =
+        jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+      assert.is_nil(claims)
+      assert.is_string(err)
+      -- 受信トークンの不正ではなくキャッシュ層の異常なので upstream エラー（502 経路）
+      assert.is_truthy(is_upstream)
+      -- invalidate は呼ばれず、既存キャッシュが温存される
+      assert.equal(0, invalidate_count)
+
+      -- 旧鍵 test-key-1 のトークンは引き続き検証できる（HTTP 再取得も不要 = キャッシュヒット）
+      local calls_before = http_call_count
+      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+      assert.equal(0, http_call_count - calls_before)
+    end)
+
+    -- Medium 2: 再取得が失敗した直後の抑止期間（30 秒デバウンス）中に来た未知 kid は、
+    -- 「トークンが不正」（401）ではなく直前と同じ IdP 障害が続いているとみなして
+    -- upstream エラー（502 経路）として分類すべき。誤分類だとクライアントに
+    -- 「トークンを直せ」という誤ったシグナルを返してしまう
+    it("再取得失敗後の抑止期間中の未知 kid は upstream エラー（502 経路）として返す", function()
+      -- まず正常なトークンで JWKS（旧鍵 test-key-1）をキャッシュに載せる
+      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+
+      -- IdP を全断させる
+      http_responses = {}
+
+      -- 1 回目の未知 kid: 再取得を試みて失敗 → upstream エラー
+      local _, err1, up1 = jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+      assert.is_string(err1)
+      assert.is_truthy(up1)
+
+      -- 2 回目（抑止期間中）: 再取得はデバウンスで抑止されるが、直前の失敗が
+      -- 続いているとみなして upstream エラーとして返すこと
+      local claims2, err2, up2 = jwt_validator.validate(conf, jwt.make(nil, { kid = "test-key-2" }))
+      assert.is_nil(claims2)
+      assert.is_string(err2)
+      assert.is_truthy(up2)
+
+      -- 回帰確認: 抑止期間中でも、キャッシュ済みの旧鍵 test-key-1 のトークンは検証成功する
+      assert.is_truthy(jwt_validator.validate(conf, jwt.make()))
+    end)
+
+    it("再取得成功後の抑止期間中の未知 kid は upstream エラーにしない（401 のまま）", function()
+      -- IdP は正常応答のまま。未知 kid → 再取得成功、しかし kid は本当に存在しない
+      local _, err1, up1 = jwt_validator.validate(conf, jwt.make(nil, { kid = "no-such-kid" }))
+      assert.is_string(err1)
+      assert.is_falsy(up1)
+
+      -- 抑止期間中の 2 回目も、直前の再取得は成功している（IdP は健在）ので 401 のまま
+      local claims2, err2, up2 = jwt_validator.validate(conf, jwt.make(nil, { kid = "no-such-kid" }))
+      assert.is_nil(claims2)
+      assert.is_string(err2)
+      assert.is_falsy(up2)
     end)
   end)
 end)
