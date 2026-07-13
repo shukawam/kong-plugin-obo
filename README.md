@@ -62,7 +62,8 @@ upstream へのリクエストの `Authorization` ヘッダーを token B に差
 
 ### 3.1 対応バージョン
 
-Kong Gateway **3.9.x** で開発・検証しています（CI では `3.9.x` と `stable` をテスト）。
+Kong Gateway **3.9.x** で開発・検証しています（CI では `3.9.x` / `stable` / 本番 DP と
+同系の `3.14.0.7` をテスト）。
 Kong OSS / Enterprise の両方で動作します（Enterprise ではシークレット系フィールドが
 データベース上で暗号化されます）。
 
