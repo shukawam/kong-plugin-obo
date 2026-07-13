@@ -190,4 +190,23 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(ok)
   end)
 
+  -- 外部レビュー指摘（fail-open 防止）: 「省略（未設定）は許可、明示的な空配列は拒否」。
+  -- テンプレートの値の入れ忘れ等で空配列だけが残ると認可が黙ってスキップされてしまうため、
+  -- 空配列は設定エラーとして schema の段階で弾く
+  it("required_scopes に明示的な空配列を指定すると拒否する", function()
+    local config = base_config()
+    config.required_scopes = {}
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
+  it("required_roles に明示的な空配列を指定すると拒否する", function()
+    local config = base_config()
+    config.required_roles = {}
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_roles)
+  end)
+
 end)

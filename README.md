@@ -168,6 +168,8 @@ export KONG_PLUGINS=bundled,obo
 > 通したい場合は `required_scopes` を設定してください（`scp` を持たない app-only トークンも
 > 併せて拒否されます）。権限不足のトークンは認証失敗（`401`）ではなく `403`（`insufficient_scope`,
 > [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) §3.1）で拒否されます。
+> なお、明示的な**空配列**（`required_scopes: []` 等）は「検査なし」ではなく**設定エラー**として
+> スキーマ検証で拒否されます（値の入れ忘れが認可スキップにつながるのを防ぐため。設定するなら 1 件以上必須）。
 
 ## 5. 設定例
 

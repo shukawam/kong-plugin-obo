@@ -32,7 +32,9 @@ describe("obo: scope_validator (unit)", function()
     assert.is_true(ok)
   end)
 
-  it("required_scopes が空配列なら検査せず認可する", function()
+  it("required_scopes が空配列なら検査せず認可する（防御的挙動。空配列自体は schema で拒否される）", function()
+    -- 明示的な空配列は schema の len_min = 1 で設定時に拒否されるため、
+    -- 通常運用でこの分岐には到達しない。schema を経ない呼び出しに対する防御的挙動の確認
     local ok = scope_validator.authorize({ required_scopes = {} }, {})
     assert.is_true(ok)
   end)

@@ -52,15 +52,19 @@ local schema = {
           -- scp は「スペース区切りのスコープ文字列」で、ユーザートークンにのみ含まれる
           --（docs/obo/05 / Microsoft "Access token claims reference" の scp 行）。
           -- 要素に空白を含む値は設定ミス（scp のスペース区切りでは絶対に一致しない）なので、
-          -- Lua パターン ^%S+$（空白以外の文字が 1 文字以上）で弾いて早期に気づけるようにする
-          { required_scopes = { type = "array",
+          -- Lua パターン ^%S+$（空白以外の文字が 1 文字以上）で弾いて早期に気づけるようにする。
+          -- len_min = 1: 「省略（未設定）は許可、明示的な空配列は拒否」。値の入れ忘れで
+          -- 空配列だけが残ると認可が黙ってスキップされる（fail-open）のを設定時に検出する
+          { required_scopes = { type = "array", len_min = 1,
               elements = { type = "string", match = "^%S+$" } } },
 
           -- 受信トークンに要求するアプリロール（roles クレーム）のリスト。
           -- 設定すると、roles にこれら全てを含まないトークンを 403 で拒否する。未設定なら検査しない。
           -- roles は「文字列の配列」で、app-only トークンにもユーザーの割当ロールにも使われるため、
           -- 「ユーザートークンかどうか」の判定には使わない（docs/obo/05 の roles 行）。
-          { required_roles = { type = "array", elements = { type = "string" } } },
+          -- len_min = 1: required_scopes と同じく、明示的な空配列（fail-open のもと）を拒否する
+          { required_roles = { type = "array", len_min = 1,
+              elements = { type = "string" } } },
 
           -- Entra ID のベース URL。通常は変更不要（統合テストではモック IdP に向ける）
           { identity_base_url = typedefs.url { required = true,

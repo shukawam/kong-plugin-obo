@@ -67,7 +67,9 @@ end
 --         権限不足の場合は nil, 内部ログ用の理由（レスポンスには出さない。
 --         トークン由来の scp/roles の値は含めない）
 function M.authorize(conf, claims)
-  -- required_scopes: 設定され、かつ 1 件以上あるときだけ検査する（未設定・空配列は後方互換で素通し）
+  -- required_scopes: 設定され、かつ 1 件以上あるときだけ検査する（未設定は後方互換で素通し）。
+  -- 明示的な空配列は schema（len_min = 1）で拒否済みなので通常ここには来ない。
+  -- `> 0` の分岐は schema を経ない呼び出しに対する防御的な冗長チェック
   if not is_unset(conf.required_scopes) and #conf.required_scopes > 0 then
     local scopes = parse_scp(claims.scp)
     if not all_present(conf.required_scopes, scopes) then
@@ -76,7 +78,7 @@ function M.authorize(conf, claims)
     end
   end
 
-  -- required_roles: 同様に、設定され 1 件以上あるときだけ検査する
+  -- required_roles: 同様に、設定され 1 件以上あるときだけ検査する（空配列は schema で拒否済み）
   if not is_unset(conf.required_roles) and #conf.required_roles > 0 then
     local roles = parse_roles(claims.roles)
     if not all_present(conf.required_roles, roles) then
