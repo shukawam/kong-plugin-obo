@@ -2,7 +2,7 @@
 -- 仕様: docs/obo/05-token-validation.md
 --   1. OpenID configuration（v2.0）から jwks_uri を取得（kong.cache でキャッシュ）
 --   2. JWKS を取得し、トークンヘッダーの kid で公開鍵を選択
---      未知の kid はキャッシュを破棄して 1 回だけ再取得（鍵ロールオーバー追従）
+--      未知の kid は 1 回だけ再取得を試み、取得成功時のみキャッシュを置換（鍵ロールオーバー追従）
 --   3. RS256 署名検証
 --   4. クレーム検証: iss 完全一致 / aud 一致 / exp / nbf（クロックスキュー許容付き）
 
@@ -25,6 +25,12 @@ local METADATA_TTL = 3600
 --   「未知 kid は再取得」という挙動自体は維持し、頻度だけを制限する）
 local JWKS_REFETCH_INTERVAL = 30  -- 秒
 local last_refetch = {}  -- jwks_cache_key -> ngx.time() of last refetch
+
+-- 直近の再取得が upstream 起因（IdP 到達不能・応答異常・キャッシュ層異常）で失敗したかを
+-- キー単位で覚えておくワーカーローカルのフラグ（Medium 2 対応）。
+-- 抑止期間中に来た未知 kid を「トークン不正（401）」と「IdP 障害の継続（502）」の
+-- どちらに分類するかの判断に使う。直前の再取得が失敗していれば障害継続とみなす
+local last_refetch_failed = {}  -- jwks_cache_key -> true（直近の再取得が失敗）
 
 -- JWT 文字列を分解して header / payload / signature を取り出すローカル関数
 -- @return { header, payload, signature, signing_input } のテーブル。不正なら nil とエラー
@@ -115,7 +121,8 @@ local function jwks_cache_key(conf)
 end
 
 -- kid に対応する JWK(JSON文字列) を返すローカル関数
--- 見つからない場合はキャッシュを破棄して 1 回だけ再取得する（鍵ロールオーバー対応）
+-- 見つからない場合は 1 回だけ再取得を試み、取得に成功したときのみキャッシュを置換する
+-- （鍵ロールオーバー対応。取得失敗時は既存の stale キャッシュを温存する。Issue #3）
 -- @return jwk_json, err, is_upstream_error
 --   is_upstream_error が true の場合、失敗理由は「受信トークンが不正」ではなく
 --   「Entra ID（OpenID configuration / JWKS）に接続できない、または応答が不正な形」であることを示す。
@@ -134,24 +141,52 @@ local function get_jwk_for_kid(conf, kid)
     return by_kid[kid]
   end
 
-  -- 未知 kid での無効化+再取得はワーカー単位で頻度制限する。
+  -- 未知 kid での再取得はワーカー単位で頻度制限する。
   -- 認証不要でここまで到達できるため、制限なしだと乱数 kid を送り続けるだけで
   -- 共有キャッシュ（cluster 全体）への無効化を連打できてしまう
   local now = ngx.time()
   local last = last_refetch[cache_key]
   if last and (now - last) < JWKS_REFETCH_INTERVAL then
+    -- 直前の再取得が失敗している場合、この抑止期間中は同じ IdP 障害が続いている
+    -- 可能性が高い。「kid が見つからない」（401 相当）ではなく upstream エラー
+    -- （502 相当）として分類し、クライアントに誤ったシグナルを返さない
+    if last_refetch_failed[cache_key] then
+      return nil, "JWKS refetch recently failed (refetch suppressed)", true
+    end
     return nil, "no key found in JWKS for kid (refetch suppressed)"
   end
   last_refetch[cache_key] = now
 
-  -- キャッシュが古い可能性があるので、無効化して取り直す
-  kong.cache:invalidate(cache_key)
-  by_kid, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
-  if not by_kid then
-    return nil, tostring(err), true
+  -- Issue #3: 「取得成功後に置換」方式。kong.cache:renew を使う。
+  -- 先に invalidate してから取り直す方式だと、再取得が失敗したとき（IdP 一時断など）に
+  -- 本来まだ METADATA_TTL 有効だった正常な JWKS まで失い、以後の正当なトークンも
+  -- IdP 復旧まで 502 になる。renew はこの問題を仕組みとして解決する。
+  --
+  -- renew の実装根拠（Kong 3.9.2 / 3.14.0.7 のコンテナ内ソースで裏取り済み。
+  -- kong/cache/init.lua と kong/resty/mlcache/init.lua）:
+  --   * コールバック（load_jwks）は get の L3 コールバックと同じキー単位ロックの中で
+  --     実行される。同一ノード内で複数ワーカーに未知 kid が同時到達しても取得は直列化され、
+  --     待機中に他ワーカーが更新済みならバージョン比較でコールバック自体をスキップする。
+  --   * コールバックが失敗（nil, err）した場合は shm に一切書き込まず err を返す。
+  --     つまり既存の stale キャッシュはロック下で温存される（delete → set の隙間がない）。
+  --   * 成功時はロック下で shm を新値に置換し、ノード内ワーカーへの IPC のみ配信する。
+  --     クラスタイベント（cluster_events:broadcast）は使わないため、他ノードの正常な
+  --     キャッシュを消すことがない（他ノードは各自の未知 kid 検出時に各自 renew する）。
+  --     クラスタ全体へ無効化を配信する kong.cache:invalidate はここでは使ってはならない。
+  local fresh, renew_err = kong.cache:renew(cache_key, { ttl = METADATA_TTL }, load_jwks, conf)
+  if not fresh then
+    -- 再取得失敗: 既存キャッシュ（stale だが有効）は renew が温存している。
+    -- 失敗理由は Entra ID への接続・応答形式の問題、またはキャッシュ層の書き込み異常で
+    -- あり、いずれも受信トークンの不正ではないので upstream エラーとして返す。
+    -- 続く抑止期間中の未知 kid も同じ分類にできるよう、失敗をキー単位で記録する
+    last_refetch_failed[cache_key] = true
+    return nil, tostring(renew_err), true
   end
-  if by_kid[kid] then
-    return by_kid[kid]
+  -- 再取得成功: 失敗フラグを解除する（以後の抑止期間中の未知 kid は 401 分類に戻る）
+  last_refetch_failed[cache_key] = nil
+
+  if fresh[kid] then
+    return fresh[kid]
   end
   -- IdP には正常に接続できたが、この kid の鍵が存在しない
   -- （鍵ロールオーバーに追従できていない、または不正な kid を送ってきた）
