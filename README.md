@@ -173,7 +173,29 @@ export KONG_PLUGINS=bundled,obo
 > なお、明示的な**空配列**（`required_scopes: []` 等）は「検査なし」ではなく**設定エラー**として
 > スキーマ検証で拒否されます（値の入れ忘れが認可スキップにつながるのを防ぐため。設定するなら 1 件以上必須）。
 
-> **本番運用時の注意**: `ssl_verify = false` と `http://` の `identity_base_url` は、モック IdP を使う統合テスト専用の設定です。本番環境では `identity_base_url` に `https://` を指定し、`ssl_verify` を既定の `true` のままにしてください。プラグインは受信トークンの検証時に、メタデータ（OpenID configuration）の `issuer` が取得元と整合すること、`jwks_uri` が `identity_base_url` と同一ホストの HTTPS であること、受信トークンの `iss` がメタデータの `issuer` と完全一致することを検証します（`identity_base_url` が `http://` の場合のみ `jwks_uri` の `http://` を許容）。
+### 4.1 運用上の注意
+
+- **`ssl_verify = false` と `http://` の `identity_base_url` は統合テスト専用**: これらはモック IdP を使う統合テスト専用の設定です。本番環境では `identity_base_url` に `https://` を指定し、`ssl_verify` を既定の `true` のままにしてください。プラグインは受信トークンの検証時に、メタデータ（OpenID configuration）の `issuer` が取得元と整合すること、`jwks_uri` が `identity_base_url` と同一ホストの HTTPS であること、受信トークンの `iss` がメタデータの `issuer` と完全一致することを検証します（`identity_base_url` が `http://` の場合のみ `jwks_uri` の `http://` を許容）。
+- **交換済みトークン（token B）は共有メモリに平文で保持される**: `token_cache_enabled`
+  が既定値の `true` の場合、交換済みトークンは `kong.cache`（Kong Gateway のワーカー間
+  共有メモリキャッシュ）に保持されます（`kong/plugins/obo/token_cache.lua`）。
+  キャッシュキーは受信トークン・`client_id`・`scopes`・テナント情報から SHA-256 で
+  ハッシュ化した値ですが、キャッシュの**値**（token B 本体）は平文のままです。
+  これは Kong の標準的な認証系プラグインと同等の設計ですが、同一ノード上で動作する他の
+  プラグインや Lua コードから理論上参照できる可能性がある点に留意してください。
+  この挙動を避けたい場合は `token_cache_enabled = false` に設定してください
+  （代わりにリクエストのたびに Entra ID へ交換リクエストが発生し、レイテンシと
+  レート制限に影響します）。
+- **スキーマに露出していないハードコード既定値**: 以下の値は `config.*` として
+  設定できず、現時点ではコード内の定数として固定されています。
+  - 受信トークンの `exp` / `nbf` 検証で許容するクロックスキュー: **60 秒**
+    （`kong/plugins/obo/jwt_validator.lua` の `CLOCK_SKEW`）。
+  - OpenID 設定 / JWKS の `kong.cache` 上のキャッシュ TTL: **3600 秒**
+    （`kong/plugins/obo/jwt_validator.lua` の `METADATA_TTL`）。
+  - 未知の `kid` を受けた際にキャッシュを無効化して再取得するデバウンス間隔: **30 秒**、
+    かつ **Kong のワーカープロセス単位**（クラスタ全体では共有されないため、
+    ワーカーごとに独立してこの間隔が適用される）
+    （`kong/plugins/obo/jwt_validator.lua` の `JWKS_REFETCH_INTERVAL` / `last_refetch`）。
 
 ## 5. 設定例
 
