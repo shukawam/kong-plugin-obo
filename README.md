@@ -116,9 +116,12 @@ Observability スタック（otel-lgtm）も含みます。
 
 前提として、Konnect（コントロールプレーン側）に以下の準備が必要です:
 
-1. **カスタムプラグインのスキーマ登録**: Gateway Manager → Plugins → New Plugin →
-   Custom Plugins から `kong/plugins/obo/schema.lua` をアップロードする。
-   登録しないと、CP から obo プラグインの設定を DP に配信できない。
+1. **カスタムプラグインのスキーマ登録**: 登録しないと、CP から obo プラグインの設定を
+   DP に配信できない。方法はどちらでもよい:
+   - スクリプト（推奨）: `mise run schema-upload`（[`scripts/upload-plugin-schema.sh`](./scripts/upload-plugin-schema.sh)
+     が Konnect API 経由で登録・更新する。登録状態の確認だけなら `mise run schema-verify`）
+   - 手動: Gateway Manager → Plugins → New Plugin → Custom Plugins から
+     `kong/plugins/obo/schema.lua` をアップロードする
 2. **DP 接続情報**: Gateway Manager で DP を作成し、cluster 証明書ペアを
    `cluster-certs/cluster.crt` / `cluster-certs/cluster.key` に配置する
    （`cluster-certs/` は gitignore / dockerignore 済み。コミット・イメージ焼き込み禁止）。

@@ -1,0 +1,17 @@
+[tasks.gateway-sync]
+description = "Sync gateway configuration to Control Plane"
+dir = "{{ config_root }}/examples"
+run = """
+deck gateway sync kong.yaml
+"""
+
+[tasks.schema-upload]
+description = "Upload obo plugin schema to Konnect Control Plane (hybrid mode)"
+run = "scripts/upload-plugin-schema.sh upload"
+
+[tasks.schema-verify]
+description = "Verify obo plugin schema is registered on Konnect Control Plane"
+run = "scripts/upload-plugin-schema.sh verify"
+
+[env]
+mise.file = ".env"
