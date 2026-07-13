@@ -3,6 +3,7 @@
 
 local http  = require "resty.http"
 local cjson = require "cjson.safe"
+local util  = require "kong.plugins.obo.util"
 local client_assertion = require "kong.plugins.obo.client_assertion"
 
 local M = {}
@@ -77,9 +78,10 @@ local function safe_retry_after(headers)
   return nil
 end
 
--- テナント固有のトークンエンドポイント URL を組み立てる
+-- テナント固有のトークンエンドポイント URL を組み立てる（docs/obo/02）。
+-- URL 連結・末尾スラッシュ正規化は util.build_tenant_url に集約している
 function M.token_endpoint(conf)
-  return conf.identity_base_url .. "/" .. conf.tenant_id .. "/oauth2/v2.0/token"
+  return util.build_tenant_url(conf.identity_base_url, conf.tenant_id, "oauth2/v2.0/token")
 end
 
 -- OBO トークン交換を実行する
