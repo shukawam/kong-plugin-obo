@@ -1,8 +1,6 @@
 # ガイド 01: Konnect へのカスタムプラグイン登録
 
-Konnect のハイブリッドモードでは、Control Plane (CP) に obo プラグインの**スキーマ**を
-登録しないと、CP からプラグイン設定を Data Plane (DP) に配信できません。
-（DP 側へのプラグイン本体のインストールは [ガイド 02](02-data-plane-build.md) で行います）
+Konnect のハイブリッドモードでは、Control Plane (CP) に obo プラグインの**スキーマ**を登録しないと、CP からプラグイン設定を Data Plane (DP) に配信できません。（DP 側へのプラグイン本体のインストールは [ガイド 02](02-data-plane-build.md) で行います）
 
 ## 前提
 
@@ -31,8 +29,7 @@ DECK_KONNECT_CONTROL_PLANE_NAME=<対象 Control Plane 名>
 mise run schema:upload
 ```
 
-`scripts/upload-plugin-schema.sh` が Control Plane 名から ID を解決し、
-`kong/plugins/obo/schema.lua` を Konnect API で登録します（登録済みの場合は更新）。
+`scripts/upload-plugin-schema.sh` が Control Plane 名から ID を解決し、`kong/plugins/obo/schema.lua` を Konnect API で登録します（登録済みの場合は更新）。
 
 ### 3. 登録を確認する
 

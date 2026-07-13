@@ -1,7 +1,6 @@
 # ガイド 04: OBO トークン交換の確認
 
-Kong の Route に obo プラグインを設定し、実際にユーザーのトークンを
-ダウンストリーム API 用トークンに交換できることを確認します。
+Kong の Route に obo プラグインを設定し、実際にユーザーのトークンをダウンストリーム API 用トークンに交換できることを確認します。
 
 ## 前提
 
@@ -12,9 +11,7 @@ Kong の Route に obo プラグインを設定し、実際にユーザーのト
 
 ### 1. ゲートウェイ設定を Konnect に同期する
 
-`examples/kong.yaml` に検証用の Service（`https://httpbin.konghq.com`）と
-Route（`/mock`）、obo プラグインの設定が定義されています。設定値は `.env` の
-`DECK_*` 変数から解決されます。
+`examples/kong.yaml` に検証用の Service（`https://httpbin.konghq.com`）と Route（`/mock`）、obo プラグインの設定が定義されています。設定値は `.env` の `DECK_*` 変数から解決されます。
 
 ```bash
 mise run gateway:diff    # 反映される差分の確認
@@ -54,9 +51,7 @@ TOKEN_A="<取得した access_token>"
 curl -s -H "Authorization: Bearer ${TOKEN_A}" http://localhost:8000/mock/anything | jq .headers.authorization
 ```
 
-httpbin の `/anything` は受信したリクエストをそのまま JSON で返すため、
-表示された `authorization` ヘッダーの値が **token A と異なる**（`Bearer eyJ...` の別トークン）
-であれば、OBO 交換が成功しています。この値が交換後トークン（token B）です。
+httpbin の `/anything` は受信したリクエストをそのまま JSON で返すため、表示された `authorization` ヘッダーの値が **token A と異なる**（`Bearer eyJ...` の別トークン）であれば、OBO 交換が成功しています。この値が交換後トークン（token B）です。
 
 トークンなしの場合は 401 が返ることも確認します:
 
@@ -81,6 +76,4 @@ curl -si http://localhost:8000/mock/anything | head -3
 docker compose logs kong | grep "obo:"
 ```
 
-`obo: unauthorized: <理由>` または `obo: token exchange failed: <Entra のエラー>` が
-表示されるので、理由に応じて [ガイド 03](03-entra-id-setup.md) の該当設定と
-`.env` の値（変更後は `gateway:sync`）を見直してください。
+`obo: unauthorized: <理由>` または `obo: token exchange failed: <Entra のエラー>` が表示されるので、理由に応じて [ガイド 03](03-entra-id-setup.md) の該当設定と `.env` の値（変更後は `gateway:sync`）を見直してください。
