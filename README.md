@@ -192,9 +192,10 @@ export KONG_PLUGINS=bundled,obo
     （`kong/plugins/obo/jwt_validator.lua` の `CLOCK_SKEW`）。
   - OpenID 設定 / JWKS の `kong.cache` 上のキャッシュ TTL: **3600 秒**
     （`kong/plugins/obo/jwt_validator.lua` の `METADATA_TTL`）。
-  - 未知の `kid` を受けた際にキャッシュを無効化して再取得するデバウンス間隔: **30 秒**、
-    かつ **Kong のワーカープロセス単位**（クラスタ全体では共有されないため、
-    ワーカーごとに独立してこの間隔が適用される）
+  - 未知の `kid` を受けた際に、既存の鍵セットを保持したまま `kong.cache:renew` で JWKS を
+    再取得・更新するデバウンス間隔: **30 秒**、かつ **Kong のワーカープロセス単位**
+    （クラスタ全体では共有されないため、ワーカーごとに独立してこの間隔が適用される）。
+    再取得に失敗した場合は既存の鍵セットを使い続ける
     （`kong/plugins/obo/jwt_validator.lua` の `JWKS_REFETCH_INTERVAL` / `last_refetch`）。
 
 ## 5. 設定例
