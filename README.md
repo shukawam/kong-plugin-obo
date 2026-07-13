@@ -142,7 +142,7 @@ export KONG_PLUGINS=bundled,obo
 
 | 名前 | 型 | 必須 | 既定値 | 説明 |
 |---|---|---|---|---|
-| `tenant_id` | string | 必須 | - | Entra ID のテナント ID（GUID）。トークンエンドポイントと issuer の導出に使う。 |
+| `tenant_id` | string | 必須 | - | Entra ID のテナント ID。トークンエンドポイントと issuer の導出に使う。単一テナント前提のため **GUID 形式のみ**許可する（`contoso.onmicrosoft.com` などのドメイン名や `common` / `organizations` は不可）。 |
 | `client_id` | string | 必須 | - | middle-tier（この Kong Gateway）として登録したアプリのクライアント ID。 |
 | `client_auth_method` | string (`client_secret` \| `private_key_jwt`) | 省略可 | `client_secret` | Entra ID へのクライアント認証方式。 |
 | `client_secret` | string | 条件付き必須※1 | - | `client_auth_method = client_secret` のときのシークレット。Vault 参照（`{vault://...}`）可能、Kong EE では暗号化保存される。 |
@@ -153,7 +153,7 @@ export KONG_PLUGINS=bundled,obo
 | `issuer` | string | 任意 | - | 受信トークンの `iss` クレームの期待値。省略時は `identity_base_url` と `tenant_id` から `{identity_base_url}/{tenant_id}/v2.0` の形式で導出する。 |
 | `required_scopes` | array of string | 任意 | - | 受信トークンの `scp`（委任スコープ）クレームに含まれていなければならないスコープのリスト。設定すると、指定した全スコープを持たないトークンを `403`（`insufficient_scope`）で拒否する。`scp` はユーザートークンにのみ含まれるため、これを設定すると `scp` を持たない app-only / daemon トークンも拒否される。**未設定なら `scp` の検査は行わない**（下記の注記を参照）。 |
 | `required_roles` | array of string | 任意 | - | 受信トークンの `roles`（アプリロール）クレームに含まれていなければならないロールのリスト。設定すると、指定した全ロールを持たないトークンを `403` で拒否する。未設定なら検査しない。`roles` は app-only トークンにもユーザーの割当ロールにも現れるため、これのみ設定した場合も**非空の `scp` クレームの存在**を併せて要求し、`scp` を持たない app-only / ID トークンは `403` で拒否する（`scp` の値の照合はしない。OBO はユーザー委任トークン専用のため）。要素は app role の「Value」（空白を含められない）を指定する。 |
-| `identity_base_url` | url | 省略可 | `https://login.microsoftonline.com` | Entra ID のベース URL。通常は変更不要（ソブリンクラウドやテストで使用）。 |
+| `identity_base_url` | url | 省略可 | `https://login.microsoftonline.com` | Entra ID のベース URL。通常は変更不要（ソブリンクラウドやテストで使用）。末尾スラッシュは自動で正規化される。**本番では必ず `https://` を指定する**（`http://` はモック IdP を使う統合テスト用）。 |
 | `token_cache_enabled` | boolean | 省略可 | `true` | 交換済みトークンをキャッシュするか。 |
 | `cache_ttl_margin` | integer (`>= 0`) | 省略可 | `30` | キャッシュ TTL を `expires_in` から何秒差し引くか（期限ギリギリのトークンを使わないための余裕、秒）。 |
 | `http_timeout` | integer (`> 0`) | 省略可 | `10000` | Entra ID への HTTP タイムアウト（ミリ秒）。 |
@@ -171,6 +171,8 @@ export KONG_PLUGINS=bundled,obo
 > [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) §3.1）で拒否されます。
 > なお、明示的な**空配列**（`required_scopes: []` 等）は「検査なし」ではなく**設定エラー**として
 > スキーマ検証で拒否されます（値の入れ忘れが認可スキップにつながるのを防ぐため。設定するなら 1 件以上必須）。
+
+> **本番運用時の注意**: `ssl_verify = false` と `http://` の `identity_base_url` は、モック IdP を使う統合テスト専用の設定です。本番環境では `identity_base_url` に `https://` を指定し、`ssl_verify` を既定の `true` のままにしてください。プラグインは受信トークンの検証時に、メタデータ（OpenID configuration）の `issuer` が期待値と完全一致すること、および `jwks_uri` が `identity_base_url` と同一ホストの HTTPS であることを検証します（`identity_base_url` が `http://` の場合のみ `jwks_uri` の `http://` を許容）。
 
 ## 5. 設定例
 
