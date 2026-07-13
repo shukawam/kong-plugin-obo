@@ -97,10 +97,30 @@ local function validate_metadata_issuer(conf, issuer)
   if type(issuer) ~= "string" then
     return nil, "issuer missing in openid-configuration"
   end
-  -- OIDC Discovery: issuer は取得元 authority と完全一致すること。
-  -- 不一致はメタデータの正当性が疑わしい（IdP 側の異常）ため取得失敗として扱う
-  if issuer ~= metadata_authority(conf) then
-    return nil, "openid-configuration issuer mismatch"
+  if util.is_guid(conf.tenant_id) then
+    -- GUID テナント: OIDC Discovery のとおり issuer は取得元 authority
+    -- （{identity_base_url}/{tenant_id}/v2.0）と完全一致すること。
+    -- 不一致はメタデータの正当性が疑わしい（IdP 側の異常）ため取得失敗として扱う
+    if issuer ~= metadata_authority(conf) then
+      return nil, "openid-configuration issuer mismatch"
+    end
+  else
+    -- ドメイン形式テナント（contoso.onmicrosoft.com 等）: Entra はドメイン名で
+    -- メタデータを要求しても issuer を正規化済みの GUID 形式（{base}/{GUID}/v2.0）で
+    -- 返す（実メタデータで裏取り済み）ため、取得元との完全一致は成立しない。
+    -- 代わりに「identity_base_url と同一の scheme/authority」かつ
+    -- 「パスが /{GUID}/v2.0 の形式」であることを検証する（docs/obo/05: v2.0 の
+    -- テナント固有 issuer は https://login.microsoftonline.com/{tenantid}/v2.0 形式）
+    local base_scheme, base_authority = util.url_scheme_authority(conf.identity_base_url)
+    local iss_scheme, iss_authority = util.url_scheme_authority(issuer)
+    if iss_scheme ~= base_scheme or iss_authority ~= base_authority then
+      return nil, "openid-configuration issuer host mismatch"
+    end
+    -- authority の直後が「/{GUID}/v2.0」で終わる形式であることを確認する
+    local tid = issuer:match("^%a[%w+.-]*://[^/]+/([^/]+)/v2%.0$")
+    if not tid or not util.is_guid(tid) then
+      return nil, "openid-configuration issuer is not a tenant-specific v2.0 issuer"
+    end
   end
   -- conf.issuer はメタデータ issuer に対する任意の「ピン」（追加の防御）。
   -- 設定されている場合、メタデータの issuer がその値と完全一致しなければ拒否する。

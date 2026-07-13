@@ -95,6 +95,38 @@ describe("obo: util.build_tenant_url (unit)", function()
     assert.is_nil(util.build_tenant_url(12345, "tenant-x", "v2.0"))
     assert.is_nil(util.build_tenant_url("https://login.microsoftonline.com", nil, "v2.0"))
   end)
+
+  it("ドメイン形式の tenant_id も小文字に正規化する（DNS は大文字小文字を区別しない）", function()
+    assert.equal(
+      "https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0",
+      util.build_tenant_url("https://login.microsoftonline.com",
+                            "Contoso.OnMicrosoft.Com", "v2.0"))
+  end)
+end)
+
+describe("obo: util.is_guid (unit)", function()
+  local util
+
+  setup(function()
+    util = require("kong.plugins.obo.util")
+  end)
+
+  teardown(function()
+    package.loaded["kong.plugins.obo.util"] = nil
+  end)
+
+  it("GUID（大文字小文字とも）を受理する", function()
+    assert.is_true(util.is_guid("11111111-2222-3333-4444-555555555555"))
+    assert.is_true(util.is_guid("AAAABBBB-1111-2222-3333-444455556666"))
+  end)
+
+  it("GUID でない文字列・非文字列を拒否する", function()
+    assert.is_false(util.is_guid("contoso.onmicrosoft.com"))
+    assert.is_false(util.is_guid("common"))
+    assert.is_false(util.is_guid("11111111-2222-3333-4444-55555555555"))  -- 1 桁不足
+    assert.is_false(util.is_guid(nil))
+    assert.is_false(util.is_guid(12345))
+  end)
 end)
 
 describe("obo: util.url_scheme_authority (unit)", function()

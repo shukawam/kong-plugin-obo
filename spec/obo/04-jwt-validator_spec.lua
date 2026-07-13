@@ -327,6 +327,71 @@ describe("obo: jwt_validator (unit)", function()
     assert.is_truthy(claims)
   end)
 
+  -- ドメイン形式の tenant_id（contoso.onmicrosoft.com 等）のサポート。
+  -- Entra の実メタデータはドメイン名で要求しても issuer を正規化済みの GUID 形式
+  -- （{base}/{GUID}/v2.0）で返す（実メタデータで裏取り済み）。そのため導出値との完全一致は
+  -- 成立せず、「同一ホスト + /{GUID}/v2.0 形式」であることを検証し、その issuer を
+  -- 受信トークンの iss の期待値として使う。
+  describe("ドメイン形式の tenant_id", function()
+    local DOMAIN        = "contoso.onmicrosoft.com"
+    local DOMAIN_CONFIG = MOCK_BASE .. "/" .. DOMAIN .. "/v2.0/.well-known/openid-configuration"
+    local DOMAIN_JWKS   = MOCK_BASE .. "/" .. DOMAIN .. "/discovery/v2.0/keys"
+
+    before_each(function()
+      conf.tenant_id = DOMAIN
+      -- メタデータはドメインのパスで取得されるが、issuer は GUID 形式（MOCK_ISSUER）を返す
+      http_responses[DOMAIN_CONFIG] = {
+        status = 200,
+        body = cjson.encode({
+          issuer = MOCK_ISSUER,
+          jwks_uri = DOMAIN_JWKS,
+        }),
+      }
+      http_responses[DOMAIN_JWKS] = {
+        status = 200,
+        body = cjson.encode({ keys = { keys.jwk() } }),
+      }
+    end)
+
+    it("メタデータの GUID issuer と一致する iss のトークンを受理する", function()
+      local claims, err = jwt_validator.validate(conf, make())  -- make() の iss = MOCK_ISSUER
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+    end)
+
+    it("メタデータの issuer が GUID 形式でない場合は upstream エラーとして拒否する", function()
+      -- ドメインのままの issuer は Entra の正規形ではない（テナントの同定が成立しない）
+      http_responses[DOMAIN_CONFIG].body = cjson.encode({
+        issuer = MOCK_BASE .. "/" .. DOMAIN .. "/v2.0",
+        jwks_uri = DOMAIN_JWKS,
+      })
+      local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream_error)
+    end)
+
+    it("メタデータの issuer が別ホストの場合は upstream エラーとして拒否する", function()
+      http_responses[DOMAIN_CONFIG].body = cjson.encode({
+        issuer = "https://evil.example/" .. TENANT .. "/v2.0",
+        jwks_uri = DOMAIN_JWKS,
+      })
+      local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream_error)
+    end)
+
+    it("メタデータの GUID issuer と一致しない iss のトークンを拒否する（401）", function()
+      -- 同一ホストの別テナント GUID を名乗るトークンは拒否されること
+      local other = "22222222-2222-2222-2222-222222222222"
+      local token = make({ iss = MOCK_BASE .. "/" .. other .. "/v2.0" })
+      local claims, _, is_upstream_error = jwt_validator.validate(conf, token)
+      assert.is_nil(claims)
+      assert.is_falsy(is_upstream_error)
+    end)
+  end)
+
   it("JWKS に存在しない kid（IdP 自体は正常応答）は upstream エラーにしない（401 のまま）", function()
     local token = make(nil, { kid = "unknown-key" })
     local claims, err, is_upstream_error = jwt_validator.validate(conf, token)

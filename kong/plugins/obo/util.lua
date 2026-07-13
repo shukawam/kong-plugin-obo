@@ -39,7 +39,7 @@ end
 -- identity_base_url の末尾スラッシュをここで正規化することで、設定に末尾スラッシュが
 -- 付いていても issuer が "...//tenant/v2.0" のように壊れることを防ぐ。
 -- @param base identity_base_url（例: "https://login.microsoftonline.com"。末尾 "/" 付き可）
--- @param tenant_id テナント ID（GUID）。大文字は小文字に正規化される（下記コメント参照）
+-- @param tenant_id テナント ID（GUID またはドメイン名）。小文字に正規化される（下記コメント参照）
 -- @param path 連結する残りのパス（先頭スラッシュなし。省略時は {base}/{tenant} まで）
 --             例: "v2.0/.well-known/openid-configuration" / "oauth2/v2.0/token" / "v2.0"
 -- @return 連結済み URL 文字列。base / tenant_id が文字列でなければ nil とエラー理由
@@ -52,15 +52,29 @@ function M.build_tenant_url(base, tenant_id, path)
   -- 末尾のスラッシュを（複数連続していても）まとめて 1 個も残さず除去する。
   -- gsub は (置換後文字列, 置換回数) を返すため括弧で 1 値に絞る
   base = (base:gsub("/+$", ""))
-  -- tenant_id（GUID）を小文字に正規化する。Entra ID のメタデータは、大文字 GUID で
+  -- tenant_id を小文字に正規化する。Entra ID のメタデータは、大文字 GUID で
   -- 要求しても issuer 内の GUID を小文字で返す（実メタデータで裏取り済み）ため、
   -- 大文字のまま導出すると metadata issuer の完全一致検証が常に失敗してしまう。
-  -- GUID の 16 進表記は大文字小文字の区別を持たないので、小文字化しても同じテナントを指す
+  -- GUID の 16 進表記は大文字小文字の区別を持たず、ドメイン名（contoso.onmicrosoft.com 等）も
+  -- DNS が大文字小文字を区別しないため、どちらの形式でも小文字化は同じテナントを指す
   local url = base .. "/" .. tenant_id:lower()
   if path and path ~= "" then
     url = url .. "/" .. path
   end
   return url
+end
+
+-- GUID（8-4-4-4-12 桁の 16 進）の Lua パターン。%x は大文字小文字どちらの 16 進にも
+-- マッチする。schema（tenant_id の形式検証）と jwt_validator（issuer の形式検証）で共用する
+M.GUID_PATTERN =
+  "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+
+-- 文字列が GUID かどうかを判定する（大文字小文字は問わない）
+-- @param s 判定対象
+-- @return boolean
+function M.is_guid(s)
+  -- match は不一致で nil を返すため、~= nil で必ず boolean に揃える
+  return type(s) == "string" and s:match(M.GUID_PATTERN) ~= nil
 end
 
 -- 絶対 URL から scheme と authority（host[:port]）を取り出す。

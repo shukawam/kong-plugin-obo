@@ -142,7 +142,7 @@ export KONG_PLUGINS=bundled,obo
 
 | 名前 | 型 | 必須 | 既定値 | 説明 |
 |---|---|---|---|---|
-| `tenant_id` | string | 必須 | - | Entra ID のテナント ID。トークンエンドポイントと issuer の導出に使う。単一テナント前提のため **GUID 形式のみ**許可する（`contoso.onmicrosoft.com` などのドメイン名や `common` / `organizations` は不可）。大文字の GUID は URL / issuer の導出時に小文字へ正規化される（Entra のメタデータは小文字 GUID の issuer を返すため）。 |
+| `tenant_id` | string | 必須 | - | Entra ID のテナント ID（GUID）またはテナントのドメイン名（`contoso.onmicrosoft.com` など）。メタデータ URL とトークンエンドポイントの導出に使う。単一テナント前提のため、マルチテナント別名（`common` / `organizations` / `consumers`）は不可。大文字は URL の導出時に小文字へ正規化される。ドメイン名を指定した場合、受信トークンの `iss` の期待値にはメタデータが返す正規化済みの GUID 形式 issuer が使われる。 |
 | `client_id` | string | 必須 | - | middle-tier（この Kong Gateway）として登録したアプリのクライアント ID。 |
 | `client_auth_method` | string (`client_secret` \| `private_key_jwt`) | 省略可 | `client_secret` | Entra ID へのクライアント認証方式。 |
 | `client_secret` | string | 条件付き必須※1 | - | `client_auth_method = client_secret` のときのシークレット。Vault 参照（`{vault://...}`）可能、Kong EE では暗号化保存される。 |

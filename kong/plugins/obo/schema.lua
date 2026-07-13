@@ -1,15 +1,18 @@
 local typedefs = require "kong.db.schema.typedefs"
+local util = require "kong.plugins.obo.util"
 
 -- プラグイン名。ディレクトリ名（kong/plugins/obo）と一致している必要がある
 local PLUGIN_NAME = "obo"
 
 -- tenant_id は URL パス（メタデータ / トークンエンドポイント / issuer）にそのまま連結される。
--- 本プラグインは単一テナント前提のため、ドメイン名（contoso.onmicrosoft.com）や
--- common / organizations ではなく GUID のみを許可する。ドメイン名を許可すると、
--- メタデータが返す正規化済み GUID issuer との突き合わせが別途必要になり複雑化する
--- （docs/obo/05「Validate the issuer」）。8-4-4-4-12 桁の 16 進（大文字小文字問わず）。
-local TENANT_ID_GUID_PATTERN =
-  "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+-- Microsoft Learn（v2-protocols-oidc）のとおり {tenant} には「テナント ID（GUID）または
+-- contoso.onmicrosoft.com のようなドメイン名」を指定できるため、その両形式を受理する。
+-- 一方 common / organizations / consumers（マルチテナント別名）は単一テナント前提の
+-- 本プラグインでは使えないため拒否する（ドットを含まないのでドメインパターンに一致しない）。
+-- ドメインパターンは「英数字で開始・終了し、ドットを 1 つ以上含む。英数字とハイフン・
+-- ドットのみ」の簡易な健全性チェック。テナントの厳密な同定はメタデータの issuer 検証
+--（{base}/{GUID}/v2.0 形式の確認）が担う。
+local TENANT_ID_DOMAIN_PATTERN = "^%w[%w%-%.]*%.[%w%-%.]*%w$"
 
 local schema = {
   name = PLUGIN_NAME,
@@ -21,12 +24,16 @@ local schema = {
     { config = {
         type = "record",
         fields = {
-          -- Entra ID のテナント ID（GUID）。トークンエンドポイントと issuer の導出に使う。
-          -- 単一テナント前提のため GUID 形式のみ許可する（match で検証）。
-          -- 大文字の GUID も受理するが、URL / issuer の導出時に util.build_tenant_url が
-          -- 小文字へ正規化する（Entra のメタデータ issuer は小文字 GUID で返るため）
+          -- Entra ID のテナント ID（GUID）またはテナントのドメイン名。
+          -- メタデータ URL・トークンエンドポイントの導出に使う。
+          -- 大文字も受理するが、URL の導出時に util.build_tenant_url が小文字へ正規化する
+          -- （Entra のメタデータ issuer は小文字 GUID で返るため）。
+          -- match_any は「いずれかのパターンに一致すれば受理」する Kong スキーマの検証子
           { tenant_id = { type = "string", required = true,
-              match = TENANT_ID_GUID_PATTERN } },
+              match_any = {
+                patterns = { util.GUID_PATTERN, TENANT_ID_DOMAIN_PATTERN },
+                err = "must be a tenant GUID or a tenant domain name (e.g. contoso.onmicrosoft.com)",
+              } } },
 
           -- middle-tier（このゲートウェイ）として登録したアプリのクライアント ID
           { client_id = { type = "string", required = true } },
