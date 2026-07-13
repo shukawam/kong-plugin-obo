@@ -46,6 +46,19 @@ local schema = {
           -- 受信トークンの iss の期待値。省略時は identity_base_url と tenant_id から導出
           { issuer = { type = "string" } },
 
+          -- 受信トークンに要求する委任スコープ（scp クレーム）のリスト。
+          -- 設定すると、scp にこれら全てを含まないトークンを 403（insufficient_scope）で拒否する。
+          -- 未設定なら scp の検査は行わない（後方互換）。認可を別プラグイン等に委ねる運用も可能。
+          -- scp は「スペース区切りのスコープ文字列」で、ユーザートークンにのみ含まれる
+          --（docs/obo/05 / Microsoft "Access token claims reference" の scp 行）。
+          { required_scopes = { type = "array", elements = { type = "string" } } },
+
+          -- 受信トークンに要求するアプリロール（roles クレーム）のリスト。
+          -- 設定すると、roles にこれら全てを含まないトークンを 403 で拒否する。未設定なら検査しない。
+          -- roles は「文字列の配列」で、app-only トークンにもユーザーの割当ロールにも使われるため、
+          -- 「ユーザートークンかどうか」の判定には使わない（docs/obo/05 の roles 行）。
+          { required_roles = { type = "array", elements = { type = "string" } } },
+
           -- Entra ID のベース URL。通常は変更不要（統合テストではモック IdP に向ける）
           { identity_base_url = typedefs.url { required = true,
               default = "https://login.microsoftonline.com" } },

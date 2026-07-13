@@ -129,4 +129,41 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.cache_ttl_margin)
   end)
 
+  -- Issue #1: 受信トークンの scp / roles による認可（required_scopes / required_roles）
+  it("required_scopes に文字列の配列を指定できる", function()
+    local config = base_config()
+    config.required_scopes = { "access_as_user", "Files.Read" }
+    local ok, err = validate(config)
+    assert.is_nil(err)
+    assert.is_truthy(ok)
+  end)
+
+  it("required_roles に文字列の配列を指定できる", function()
+    local config = base_config()
+    config.required_roles = { "Task.Admin" }
+    local ok, err = validate(config)
+    assert.is_nil(err)
+    assert.is_truthy(ok)
+  end)
+
+  it("required_scopes / required_roles は省略できる（未設定＝後方互換で検査なし）", function()
+    local config = base_config()
+    config.required_scopes = nil
+    config.required_roles = nil
+    local ok = validate(config)
+    assert.is_truthy(ok)
+    -- 既定値のない optional 配列は、省略すると ngx.null（未設定）に正規化される。
+    -- scope_validator はこの ngx.null を「検査なし」として扱う必要がある
+    assert.equal(ngx.null, ok.config.required_scopes)
+    assert.equal(ngx.null, ok.config.required_roles)
+  end)
+
+  it("required_scopes の要素が文字列でないと拒否する", function()
+    local config = base_config()
+    config.required_scopes = { 123 }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.required_scopes)
+  end)
+
 end)
