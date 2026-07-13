@@ -112,10 +112,14 @@ http {
           content_by_lua_block {
               local tenant = ngx.var[1]
               ngx.header["Content-Type"] = "application/json"
+              -- issuer は取得元 authority（{identity_base_url}/{tenant}/v2.0）と一致させる。
+              -- identity_base_url をこのモック（http://127.0.0.1:10999）に向けているため、
+              -- issuer もこのホストで返す（OIDC Discovery の issuer 完全一致検証を通す）
               ngx.say(string.format(
-                '{"token_endpoint":"http://127.0.0.1:10999/%s/oauth2/v2.0/token",' ..
+                '{"issuer":"http://127.0.0.1:10999/%s/v2.0",' ..
+                '"token_endpoint":"http://127.0.0.1:10999/%s/oauth2/v2.0/token",' ..
                 '"jwks_uri":"http://127.0.0.1:10999/%s/discovery/v2.0/keys"}',
-                tenant, tenant))
+                tenant, tenant, tenant))
           }
       }
 

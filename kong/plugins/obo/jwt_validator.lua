@@ -83,6 +83,37 @@ local function http_get_json(conf, url)
   return body
 end
 
+-- OpenID configuration の取得元 authority（= 期待される issuer）を導出するローカル関数。
+-- OIDC Discovery ではメタデータの issuer が、メタデータ取得に使った authority
+-- （{identity_base_url}/{tenant_id}/v2.0）と完全一致しなければならない。
+-- conf.issuer（受信トークンの iss 期待値の上書き）とは別概念なので、ここでは常に導出値を使う
+local function metadata_authority(conf)
+  return util.build_tenant_url(conf.identity_base_url, conf.tenant_id, "v2.0")
+end
+
+-- メタデータが返した jwks_uri の scheme と host を検証するローカル関数。
+-- 別ホストや平文経路からの署名鍵取得を防ぐ（docs/obo/05: 鍵は jwks_uri から取得する前提）。
+-- @return true。問題があれば nil, エラー理由
+local function validate_jwks_uri(conf, jwks_uri)
+  local base_scheme, base_authority = util.url_scheme_authority(conf.identity_base_url)
+  local jwks_scheme, jwks_authority = util.url_scheme_authority(jwks_uri)
+  if not jwks_scheme then
+    return nil, "jwks_uri is not an absolute URL"
+  end
+  -- scheme: 原則 HTTPS を要求。identity_base_url が http のとき（統合テストのモック IdP 用）
+  -- のみ http を許容する。本番は identity_base_url が https なので http は拒否される
+  if jwks_scheme ~= "https" then
+    if not (base_scheme == "http" and jwks_scheme == "http") then
+      return nil, "jwks_uri must use https"
+    end
+  end
+  -- host: identity_base_url と同一 authority（host[:port]）でなければならない
+  if jwks_authority ~= base_authority then
+    return nil, "jwks_uri host mismatch"
+  end
+  return true
+end
+
 -- OpenID 設定 → JWKS の順に取得し、kid → JWK(JSON文字列) のテーブルを作るローカル関数
 -- kong.cache のコールバックとして呼ばれる（キャッシュミス時のみ実行される）
 local function load_jwks(conf)
@@ -93,8 +124,18 @@ local function load_jwks(conf)
   if not oidc then
     return nil, err
   end
+  -- OIDC Discovery: issuer は取得元 authority と完全一致すること。
+  -- 不一致はメタデータの正当性が疑わしい（IdP 側の異常）ため取得失敗として扱う
+  if oidc.issuer ~= metadata_authority(conf) then
+    return nil, "openid-configuration issuer mismatch"
+  end
   if type(oidc.jwks_uri) ~= "string" then
     return nil, "jwks_uri missing in openid-configuration"
+  end
+  -- jwks_uri の scheme / host を検証（別ホスト・平文経路からの鍵取得を防ぐ）
+  local ok_uri, uri_err = validate_jwks_uri(conf, oidc.jwks_uri)
+  if not ok_uri then
+    return nil, uri_err
   end
 
   local jwks, jwks_err = http_get_json(conf, oidc.jwks_uri)
@@ -239,8 +280,7 @@ function M.validate(conf, token)
 
   -- iss: メタデータの issuer と完全一致が原則（docs/obo/05）。
   -- conf.issuer 未指定なら v2.0 の形式（{base}/{tenant}/v2.0）を導出する
-  local expected_iss = conf.issuer
-      or util.build_tenant_url(conf.identity_base_url, conf.tenant_id, "v2.0")
+  local expected_iss = conf.issuer or metadata_authority(conf)
   if claims.iss ~= expected_iss then
     return nil, "issuer mismatch"
   end

@@ -66,11 +66,15 @@ describe("obo: jwt_validator (unit)", function()
       ssl_verify = false,
       -- issuer 省略 → identity_base_url と tenant_id から導出される
     }
-    -- 正常な OpenID 設定と JWKS を返すモック（形式は docs/obo/05 のメタデータ例に準拠）
+    -- 正常な OpenID 設定と JWKS を返すモック（形式は docs/obo/05 のメタデータ例に準拠）。
+    -- issuer は取得元 authority（{identity_base_url}/{tenant_id}/v2.0）と一致させる（OIDC Discovery）
     http_responses = {
       ["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"] = {
         status = 200,
-        body = cjson.encode({ jwks_uri = "https://mock-idp.example/test-tenant/discovery/v2.0/keys" }),
+        body = cjson.encode({
+          issuer = "https://mock-idp.example/test-tenant/v2.0",
+          jwks_uri = "https://mock-idp.example/test-tenant/discovery/v2.0/keys",
+        }),
       },
       ["https://mock-idp.example/test-tenant/discovery/v2.0/keys"] = {
         status = 200,
@@ -93,6 +97,18 @@ describe("obo: jwt_validator (unit)", function()
     -- 導出値 https://mock-idp.example/test-tenant/v2.0 に一致する iss を持つトークン
     local token = jwt.make({ iss = "https://mock-idp.example/test-tenant/v2.0" })
     local claims = jwt_validator.validate(conf, token)
+    assert.is_truthy(claims)
+  end)
+
+  -- 受け入れ条件: 末尾スラッシュ付き identity_base_url でも issuer 導出・メタデータ URL が
+  -- 正しくなる（util.build_tenant_url による正規化の end-to-end 確認）。
+  it("末尾スラッシュ付き identity_base_url でも issuer 導出・メタデータ URL が正しい", function()
+    conf.identity_base_url = "https://mock-idp.example/"  -- 末尾スラッシュ付き
+    conf.issuer = nil  -- 導出させる。正規化されず // になると iss/メタデータ取得が壊れる
+    -- 正規化後の URL・issuer は末尾スラッシュなしと同一なので http_responses はそのまま通る
+    local token = jwt.make({ iss = "https://mock-idp.example/test-tenant/v2.0" })
+    local claims, err = jwt_validator.validate(conf, token)
+    assert.is_nil(err)
     assert.is_truthy(claims)
   end)
 
@@ -170,7 +186,7 @@ describe("obo: jwt_validator (unit)", function()
 
   it("openid-configuration に jwks_uri がない場合はエラーを返す", function()
     http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({ issuer = "x" })
+      cjson.encode({ issuer = "https://mock-idp.example/test-tenant/v2.0" })
     assert.is_nil(jwt_validator.validate(conf, jwt.make()))
   end)
 
@@ -189,7 +205,58 @@ describe("obo: jwt_validator (unit)", function()
 
   it("openid-configuration が不正な形（jwks_uri 欠落）でも upstream エラーとして返す", function()
     http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
-      cjson.encode({ issuer = "x" })
+      cjson.encode({ issuer = "https://mock-idp.example/test-tenant/v2.0" })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
+  end)
+
+  -- OIDC Discovery（openid-connect-discovery-1_0）: メタデータの issuer は取得元 authority と
+  -- 完全一致しなければならない。一致しない場合は IdP 側メタデータの異常なので upstream エラー扱い。
+  it("メタデータの issuer が期待値と一致しない場合は upstream エラーとして拒否する", function()
+    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
+      cjson.encode({
+        issuer = "https://evil.example/test-tenant/v2.0",
+        jwks_uri = "https://mock-idp.example/test-tenant/discovery/v2.0/keys",
+      })
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
+  end)
+
+  -- jwks_uri のホストが identity_base_url と異なると、署名鍵を攻撃者ホストから取得させられる。
+  -- OIDC メタデータの整合性違反として upstream エラー扱いで拒否する。
+  it("jwks_uri のホストが identity_base_url と異なる場合は upstream エラーとして拒否する", function()
+    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
+      cjson.encode({
+        issuer = "https://mock-idp.example/test-tenant/v2.0",
+        jwks_uri = "https://evil.example/test-tenant/discovery/v2.0/keys",
+      })
+    -- 攻撃者ホストが正規の鍵で応答できても（署名検証自体は通る）ホスト不一致で拒否すること
+    http_responses["https://evil.example/test-tenant/discovery/v2.0/keys"] = {
+      status = 200,
+      body = cjson.encode({ keys = { keys.jwk() } }),
+    }
+    local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
+    assert.is_nil(claims)
+    assert.is_string(err)
+    assert.is_truthy(is_upstream_error)
+  end)
+
+  -- identity_base_url が https のときは jwks_uri も https を要求する（平文での鍵取得を防ぐ）。
+  it("jwks_uri が https でない場合は upstream エラーとして拒否する（identity_base_url が https）", function()
+    http_responses["https://mock-idp.example/test-tenant/v2.0/.well-known/openid-configuration"].body =
+      cjson.encode({
+        issuer = "https://mock-idp.example/test-tenant/v2.0",
+        jwks_uri = "http://mock-idp.example/test-tenant/discovery/v2.0/keys",
+      })
+    -- 平文 http でも鍵取得自体は成功しうるが、scheme 検証で拒否すること
+    http_responses["http://mock-idp.example/test-tenant/discovery/v2.0/keys"] = {
+      status = 200,
+      body = cjson.encode({ keys = { keys.jwk() } }),
+    }
     local claims, err, is_upstream_error = jwt_validator.validate(conf, jwt.make())
     assert.is_nil(claims)
     assert.is_string(err)
