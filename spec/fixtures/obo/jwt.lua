@@ -60,9 +60,11 @@ end
 function M.make_assertion(claims_override)
   local now = ngx.time()
 
-  -- 既定クレーム（docs/obo/04）。aud は統合テストのモック IdP トークンエンドポイント URL。
+  -- 既定クレーム（docs/obo/04）。aud は統合テストのモック IdP トークンエンドポイント URL
+  -- （統合テストの TENANT_ID = GUID のパスと一致させる。スキーマが tenant_id を
+  --   GUID / ドメイン名に限定しているため、テスト設定も GUID を使っている）。
   local claims = {
-    aud = "http://127.0.0.1:10999/test-tenant/oauth2/v2.0/token",
+    aud = "http://127.0.0.1:10999/11111111-1111-1111-1111-111111111111/oauth2/v2.0/token",
     iss = "test-client-id",
     sub = "test-client-id",  -- iss と同一（docs/obo/04）
     jti = "test-jti-" .. tostring(now) .. "-" .. tostring(math.random(1e9)),
