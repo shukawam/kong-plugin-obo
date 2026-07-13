@@ -288,27 +288,45 @@ describe("obo: jwt_validator (unit)", function()
 
   -- クロックスキュー境界（±60 秒）の固定テスト。
   -- 実装は `now > claims.exp + CLOCK_SKEW` で拒否するため、ちょうど 60 秒前の exp は
-  -- 許容誤差の範囲内（受理）、61 秒前は範囲外（拒否）になるはず
-  it("exp がちょうど 60 秒前ならクロックスキュー許容範囲内として受理する", function()
-    local token = make({ exp = ngx.time() - 60 })
-    assert.is_truthy(jwt_validator.validate(conf, token))
-  end)
+  -- 許容誤差の範囲内（受理）、61 秒前は範囲外（拒否）になるはず。
+  -- トークン生成（make）と検証（validate）でそれぞれ ngx.time() を呼ぶため、
+  -- 実時刻のままだと秒境界をまたいだ瞬間に ±1 秒ずれてフレークし得る。
+  -- そこで ngx.time を固定値を返すスタブに差し替え、生成と検証が同一時刻を使うようにする
+  describe("クロックスキュー境界（ngx.time を固定）", function()
+    -- 固定する現在時刻。値自体に意味はなく「生成と検証で同一」であることが重要
+    local FROZEN_NOW = 1700000000
+    local original_ngx_time
 
-  it("exp が 61 秒前ならクロックスキュー許容範囲外として拒否する", function()
-    local token = make({ exp = ngx.time() - 61 })
-    assert.is_nil(jwt_validator.validate(conf, token))
-  end)
+    before_each(function()
+      original_ngx_time = ngx.time
+      ngx.time = function() return FROZEN_NOW end  -- luacheck: ignore
+    end)
 
-  -- nbf 側も同様に `now < claims.nbf - CLOCK_SKEW` で拒否するため、
-  -- ちょうど 60 秒後の nbf は受理、61 秒後は拒否になるはず
-  it("nbf がちょうど 60 秒後ならクロックスキュー許容範囲内として受理する", function()
-    local token = make({ nbf = ngx.time() + 60 })
-    assert.is_truthy(jwt_validator.validate(conf, token))
-  end)
+    after_each(function()
+      ngx.time = original_ngx_time  -- luacheck: ignore
+    end)
 
-  it("nbf が 61 秒後ならクロックスキュー許容範囲外として拒否する", function()
-    local token = make({ nbf = ngx.time() + 61 })
-    assert.is_nil(jwt_validator.validate(conf, token))
+    it("exp がちょうど 60 秒前ならクロックスキュー許容範囲内として受理する", function()
+      local token = make({ exp = FROZEN_NOW - 60 })
+      assert.is_truthy(jwt_validator.validate(conf, token))
+    end)
+
+    it("exp が 61 秒前ならクロックスキュー許容範囲外として拒否する", function()
+      local token = make({ exp = FROZEN_NOW - 61 })
+      assert.is_nil(jwt_validator.validate(conf, token))
+    end)
+
+    -- nbf 側も同様に `now < claims.nbf - CLOCK_SKEW` で拒否するため、
+    -- ちょうど 60 秒後の nbf は受理、61 秒後は拒否になるはず
+    it("nbf がちょうど 60 秒後ならクロックスキュー許容範囲内として受理する", function()
+      local token = make({ nbf = FROZEN_NOW + 60 })
+      assert.is_truthy(jwt_validator.validate(conf, token))
+    end)
+
+    it("nbf が 61 秒後ならクロックスキュー許容範囲外として拒否する", function()
+      local token = make({ nbf = FROZEN_NOW + 61 })
+      assert.is_nil(jwt_validator.validate(conf, token))
+    end)
   end)
 
   it("kid がヘッダーにないトークンを拒否する", function()
