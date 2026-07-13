@@ -4,9 +4,12 @@
 
 local helpers = require "spec.helpers"
 local jwt = require "spec.fixtures.obo.jwt"
+local keys = require "spec.fixtures.obo.keys"
 
 local PLUGIN_NAME = "obo"
 local MOCK_IDP = "http://127.0.0.1:10999"
+-- モック IdP のトークンエンドポイント（direct probe で使う）
+local MOCK_TOKEN_URL = MOCK_IDP .. "/test-tenant/oauth2/v2.0/token"
 
 for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
   describe(PLUGIN_NAME .. ": (integration) [#" .. strategy .. "]", function()
@@ -27,6 +30,26 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           scopes = { "api://downstream/.default" },
           audience = "test-client-id",
           -- jwt.make() の既定 iss に合わせる
+          issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
+          identity_base_url = MOCK_IDP,
+          ssl_verify = false,
+        },
+      }
+
+      -- private_key_jwt 系ルート: client assertion でクライアント認証する（docs/obo/04）
+      local route3 = bp.routes:insert({ hosts = { "obo-pkjwt.example" } })
+      bp.plugins:insert {
+        name = PLUGIN_NAME,
+        route = { id = route3.id },
+        config = {
+          tenant_id = "test-tenant",
+          client_id = "test-client-id",
+          -- client_secret ではなく秘密鍵署名の client assertion を使う
+          client_auth_method = "private_key_jwt",
+          private_key = keys.private_pem,               -- テスト用 RSA 秘密鍵（署名に使う）
+          certificate_thumbprint = "test-thumbprint",   -- x5t#S256 に入るダミー値
+          scopes = { "api://downstream/.default" },
+          audience = "test-client-id",
           issuer = "https://login.microsoftonline.com/test-tenant/v2.0",
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
@@ -82,6 +105,106 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
       -- モックバックエンドにエコーされたリクエストヘッダーを検証する
       local auth = assert.request(r).has.header("authorization")
       assert.equal("Bearer mock-exchanged-token", auth)
+    end)
+
+    it("private_key_jwt ルート: Authorization が交換後トークンに差し替わり 200", function()
+      -- プラグインが署名する client assertion をモック IdP が厳格検証（type/aud/署名/
+      -- client_secret 非同送）した上で 200 を返すため、この成功はアサーションが実際に
+      -- 正しく組まれていることの e2e 証拠になる
+      local r = client:get("/request", {
+        headers = { host = "obo-pkjwt.example", authorization = "Bearer " .. jwt.make() },
+      })
+      assert.response(r).has.status(200)
+      local auth = assert.request(r).has.header("authorization")
+      assert.equal("Bearer mock-exchanged-token", auth)
+    end)
+
+    -- ------------------------------------------------------------------
+    -- モック IdP の client assertion 検証（issue-6）を直接叩くテスト群。
+    -- プラグイン経由では常に正しい assertion しか送られないため、モックが「違反を
+    -- 実際に 400 で弾く」ことはトークンエンドポイントを直接叩いて確認する。
+    -- これによりモックの検証が偶発 pass（存在チェックだけ）でないことを保証する。
+    -- ------------------------------------------------------------------
+    local http = require "resty.http"
+
+    -- モック IdP のトークンエンドポイントに form-urlencoded で POST するローカル関数
+    local function post_token(body)
+      local c = assert(http.new())
+      return assert(c:request_uri(MOCK_TOKEN_URL, {
+        method = "POST",
+        body = ngx.encode_args(body),
+        headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+      }))
+    end
+
+    -- private_key_jwt フローの「正しい」リクエストボディを作るローカル関数。
+    -- overrides で個別フィールドを崩す（値に false を渡すとそのキーを削除する）
+    local function pkjwt_body(overrides)
+      local body = {
+        grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        requested_token_use = "on_behalf_of",
+        assertion = jwt.make(),  -- 受信ユーザートークン相当（存在すれば第 1 ゲートを通る）
+        client_id = "test-client-id",
+        scope = "api://downstream/.default",
+        client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        client_assertion = jwt.make_assertion(),
+      }
+      for k, v in pairs(overrides or {}) do
+        if v == false then body[k] = nil else body[k] = v end
+      end
+      return body
+    end
+
+    it("モック IdP: 正しい client assertion は 200 で受理される", function()
+      local res = post_token(pkjwt_body())
+      assert.equal(200, res.status)
+      assert.is_truthy(res.body:find("mock-exchanged-token", 1, true))
+    end)
+
+    it("モック IdP: client_assertion_type が不正だと 400", function()
+      local res = post_token(pkjwt_body({ client_assertion_type = "urn:wrong" }))
+      assert.equal(400, res.status)
+      -- 意図したチェック（type 検証）で弾かれたことを error_description で自己診断する
+      assert.is_truthy(res.body:find("bad client_assertion_type", 1, true))
+    end)
+
+    it("モック IdP: client_assertion の aud が不一致だと 400", function()
+      local res = post_token(pkjwt_body({
+        client_assertion = jwt.make_assertion({ aud = "https://login.microsoftonline.com/other/oauth2/v2.0/token" }),
+      }))
+      assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("aud mismatch", 1, true))
+    end)
+
+    it("モック IdP: client_assertion の署名が壊れていると 400", function()
+      local assertion = jwt.make_assertion()
+      -- 署名部の末尾を書き換えて PS256 検証を失敗させる
+      local tampered = assertion:sub(1, -3) .. "xx"
+      local res = post_token(pkjwt_body({ client_assertion = tampered }))
+      assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("signature invalid", 1, true))
+    end)
+
+    it("モック IdP: PKCS#1 v1.5 パディングで署名した client_assertion は 400", function()
+      -- PSS パディング強制の直接証明。jwt.make は pk:sign(input, "sha256")（パディング
+      -- 引数なし = PKCS#1 v1.5 パディング）で署名するため、クレームだけ正しい assertion を
+      -- 作って送ると「署名パディングの違いだけ」で弾かれるはず。
+      -- もしこれが 200 になる場合、lua-resty-openssl がパディング引数を無視して
+      -- sign/verify 双方が PKCS#1 v1.5 に落ちている（実質 RS256 化）ことを意味する。
+      local pkcs1_assertion = jwt.make({
+        aud = MOCK_TOKEN_URL,   -- aud 検証は通る値にして、署名検証だけを失敗させる
+        iss = "test-client-id",
+        sub = "test-client-id",
+      })
+      local res = post_token(pkjwt_body({ client_assertion = pkcs1_assertion }))
+      assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("signature invalid", 1, true))
+    end)
+
+    it("モック IdP: client_assertion と一緒に client_secret を送ると 400", function()
+      local res = post_token(pkjwt_body({ client_secret = "must-not-be-sent" }))
+      assert.equal(400, res.status)
+      assert.is_truthy(res.body:find("client_secret must not accompany", 1, true))
     end)
 
     it("Authorization ヘッダーなし: 401 + WWW-Authenticate", function()

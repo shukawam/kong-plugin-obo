@@ -157,6 +157,64 @@ http {
                 return
               end
 
+              -- ============================================================
+              -- private_key_jwt（client assertion）フローの厳格検証（issue-6, docs/obo/04）
+              -- client_assertion が来ている＝ private_key_jwt 方式。存在チェックだけでは
+              -- e2e の検証価値が薄いため、type・aud・署名・client_secret 非同送を実際に確かめる。
+              -- 違反はいずれも 400（invalid_client）で弾く。
+              -- ============================================================
+              if args.client_assertion then
+                -- テスト公開鍵と util を読み込む。JWKS location と同様に、既に宣言済みの
+                -- lua_package_path とは別に、この Lua ブロック内で package.path を拡張する
+                package.path = "/kong-plugin/?.lua;/kong-plugin/?/init.lua;" .. package.path
+                local pkey = require "resty.openssl.pkey"
+                local util = require "kong.plugins.obo.util"
+                local keys = require "spec.fixtures.obo.keys"
+
+                -- (1) client_assertion_type は固定 URN（docs/obo/04）
+                if args.client_assertion_type
+                   ~= "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" then
+                  ngx.status = 400
+                  ngx.say('{"error":"invalid_client","error_description":"bad client_assertion_type"}')
+                  return
+                end
+
+                -- (4) private_key_jwt では client_secret を同送してはならない
+                if args.client_secret then
+                  ngx.status = 400
+                  ngx.say('{"error":"invalid_client","error_description":"client_secret must not accompany client_assertion"}')
+                  return
+                end
+
+                -- assertion を header.payload.signature の 3 部に分解する
+                local h_b64, p_b64, s_b64 =
+                  args.client_assertion:match("^([^.]+)%.([^.]+)%.([^.]+)$")
+                local ca_payload = h_b64 and cjson.decode(util.b64url_decode(p_b64) or "")
+                if type(ca_payload) ~= "table" then
+                  ngx.status = 400
+                  ngx.say('{"error":"invalid_client","error_description":"malformed client_assertion"}')
+                  return
+                end
+
+                -- (2) aud はこのトークンエンドポイント URL と完全一致（docs/obo/04）
+                local expected_aud = "http://127.0.0.1:10999" .. ngx.var.uri
+                if ca_payload.aud ~= expected_aud then
+                  ngx.status = 400
+                  ngx.say('{"error":"invalid_client","error_description":"client_assertion aud mismatch"}')
+                  return
+                end
+
+                -- (3) 署名をテスト公開鍵で PS256（SHA-256 + RSA-PSS）検証する（docs/obo/04）
+                local pk = pkey.new(keys.public_pem)
+                local ok = pk and pk:verify(util.b64url_decode(s_b64) or "",
+                  h_b64 .. "." .. p_b64, "sha256", pkey.PADDINGS.RSA_PKCS1_PSS_PADDING)
+                if not ok then
+                  ngx.status = 400
+                  ngx.say('{"error":"invalid_client","error_description":"client_assertion signature invalid"}')
+                  return
+                end
+              end
+
               -- assertion の中身で挙動を分岐（テストシナリオ用）
               -- ペイロードに scenario=idp_error を含むトークンならエラーを返す
               local payload_b64 = args.assertion:match("^[^.]+%.([^.]+)%.")
