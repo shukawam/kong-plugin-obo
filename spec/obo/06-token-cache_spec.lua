@@ -140,6 +140,75 @@ describe("obo: token_cache (unit)", function()
     assert.same({}, cache_store)  -- キャッシュには何も入らない
   end)
 
+  -- expires_in の正規化・上限クランプのテスト（Issue #10）
+  -- IdP の異常応答（非数値・NaN・無限大・負数・欠落・超過値）でも
+  -- TTL が意図しない値（永続キャッシュ等）にならないことを確認する
+  describe("expires_in の正規化と上限クランプ", function()
+    -- expires_in を任意の値にした exchange_fn を作るローカル関数
+    -- expires_in を渡さない（nil）ことで「欠落」ケースも表現できる
+    local function exchange_with(expires_in)
+      return function()
+        exchange_calls = exchange_calls + 1
+        return { access_token = "t", expires_in = expires_in }
+      end
+    end
+
+    it("expires_in が欠落（nil）していれば TTL は最低 1 秒になる", function()
+      token_cache.get(conf, "incoming", exchange_with(nil))
+      local _, entry = next(cache_store)
+      assert.equal(1, entry.ttl)
+    end)
+
+    it("expires_in が非数値の文字列なら TTL は最低 1 秒になる", function()
+      token_cache.get(conf, "incoming", exchange_with("not-a-number"))
+      local _, entry = next(cache_store)
+      assert.equal(1, entry.ttl)
+    end)
+
+    it("expires_in が NaN なら TTL は最低 1 秒になる", function()
+      local nan = 0 / 0
+      token_cache.get(conf, "incoming", exchange_with(nan))
+      local _, entry = next(cache_store)
+      assert.equal(1, entry.ttl)
+    end)
+
+    it("expires_in が無限大（inf）なら TTL は最低 1 秒になる", function()
+      token_cache.get(conf, "incoming", exchange_with(math.huge))
+      local _, entry = next(cache_store)
+      assert.equal(1, entry.ttl)
+    end)
+
+    it("expires_in が負の無限大なら TTL は最低 1 秒になる", function()
+      token_cache.get(conf, "incoming", exchange_with(-math.huge))
+      local _, entry = next(cache_store)
+      assert.equal(1, entry.ttl)
+    end)
+
+    it("expires_in が負数なら TTL は最低 1 秒になる", function()
+      token_cache.get(conf, "incoming", exchange_with(-100))
+      local _, entry = next(cache_store)
+      assert.equal(1, entry.ttl)
+    end)
+
+    it("expires_in が数値文字列でも正しく解釈される", function()
+      token_cache.get(conf, "incoming", exchange_with("3600"))
+      local _, entry = next(cache_store)
+      assert.equal(3600 - 30, entry.ttl)
+    end)
+
+    it("expires_in が上限（86400 秒）を超える巨大な有限値なら上限にクランプされる", function()
+      token_cache.get(conf, "incoming", exchange_with(31536000)) -- 365 日
+      local _, entry = next(cache_store)
+      assert.equal(86400 - 30, entry.ttl)
+    end)
+
+    it("expires_in がちょうど上限（86400 秒）なら上限値そのまま使われる", function()
+      token_cache.get(conf, "incoming", exchange_with(86400))
+      local _, entry = next(cache_store)
+      assert.equal(86400 - 30, entry.ttl)
+    end)
+  end)
+
   it("exchange_fn の失敗はキャッシュされず、エラーがそのまま返る", function()
     local fail_exchange = function()
       exchange_calls = exchange_calls + 1
