@@ -127,6 +127,78 @@ describe("obo: jwt_validator (unit)", function()
     assert.is_truthy(is_upstream_error)
   end)
 
+  -- メタデータのキャッシュキーは identity_base_url + tenant_id で構成され conf.issuer を
+  -- 含まないため、同じテナントを指す複数のプラグイン設定（別ルート等）でキャッシュが
+  -- 共有される。ピンの照合がロード時（キャッシュミス時）だけだと、ピンなしの設定が先に
+  -- キャッシュを温めた場合に、不一致ピンを持つ設定がキャッシュヒット経由で素通りしてしまう。
+  -- ここではステートフルなキャッシュモックで「設定間キャッシュ共有」を再現し、
+  -- キャッシュヒット経路でもピンが毎回照合されることを検証する
+  describe("issuer ピンと設定間キャッシュ共有", function()
+    local original_cache
+
+    before_each(function()
+      -- ステートフルな kong.cache モック: 一度ロードした値をキーごとに保持する
+      original_cache = _G.kong.cache
+      local store = {}
+      _G.kong.cache = {
+        get = function(_, cache_key, _, cb, ...)
+          if store[cache_key] == nil then
+            local value, cb_err = cb(...)
+            if value == nil then
+              return nil, cb_err
+            end
+            store[cache_key] = value
+          end
+          return store[cache_key]
+        end,
+        invalidate = function(_, cache_key)
+          store[cache_key] = nil
+        end,
+      }
+    end)
+
+    after_each(function()
+      -- 他のテストに影響しないよう素通しモックへ戻す
+      _G.kong.cache = original_cache
+    end)
+
+    it("先に温められた共有キャッシュにヒットしても、不一致ピンの設定は拒否される", function()
+      -- (a) ピンなしの設定で検証を 1 回通し、共有キャッシュを温める
+      local claims, err = jwt_validator.validate(conf, make())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      local calls_after_warmup = http_call_count
+
+      -- (b) 同一 identity_base_url / tenant_id で不一致ピンを持つ別の設定
+      local pinned = {}
+      for k, v in pairs(conf) do pinned[k] = v end
+      pinned.issuer = "https://login.microsoftonline.com/" .. TENANT .. "/v2.0"
+
+      local claims2, err2, is_upstream_error = jwt_validator.validate(pinned, make())
+      assert.is_nil(claims2)
+      assert.is_string(err2)
+      assert.is_truthy(is_upstream_error)
+      -- キャッシュヒット経路を通っている証拠: メタデータ/JWKS の HTTP 取得回数が増えていない
+      assert.equal(calls_after_warmup, http_call_count)
+    end)
+
+    it("一致ピンの設定は共有キャッシュにヒットしても受理される", function()
+      -- (a) ピンなしの設定でキャッシュを温める
+      assert.is_truthy(jwt_validator.validate(conf, make()))
+      local calls_after_warmup = http_call_count
+
+      -- (b) メタデータの issuer と一致するピンを持つ別の設定はそのまま通る
+      local pinned = {}
+      for k, v in pairs(conf) do pinned[k] = v end
+      pinned.issuer = MOCK_ISSUER
+
+      local claims, err = jwt_validator.validate(pinned, make())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.equal(calls_after_warmup, http_call_count)  -- こちらもキャッシュヒット経路
+    end)
+  end)
+
   -- 受け入れ条件: 末尾スラッシュ付き identity_base_url でも issuer 導出・メタデータ URL が
   -- 正しくなる（util.build_tenant_url による正規化の end-to-end 確認）。
   it("末尾スラッシュ付き identity_base_url でも issuer 検証・メタデータ URL が正しい", function()

@@ -226,6 +226,23 @@ local function jwks_cache_key(conf)
   return "obo:jwks:" .. conf.identity_base_url .. ":" .. conf.tenant_id
 end
 
+-- キャッシュ経由でメタデータを取得し、conf.issuer（ピン）を毎回照合するローカル関数。
+-- キャッシュキー（identity_base_url + tenant_id）には issuer が含まれず、同じテナントを
+-- 指す別のプラグイン設定（別ルート等）とキャッシュエントリが共有されるため、
+-- ロード時（キャッシュミス時）の照合だけではキャッシュヒット経路でピンが迂回されてしまう。
+-- 正の防御としてここで毎回照合する（文字列比較 1 回なのでコストは無視できる）。
+-- @return メタデータテーブル { issuer, keys }。失敗時は nil, err
+local function get_cached_metadata(conf, cache_key)
+  local meta, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
+  if not meta then
+    return nil, tostring(err)
+  end
+  if conf.issuer ~= nil and conf.issuer ~= meta.issuer then
+    return nil, "openid-configuration issuer does not match configured issuer"
+  end
+  return meta
+end
+
 -- kid に対応する署名鍵と検証済み issuer を返すローカル関数
 -- 見つからない場合は 1 回だけ再取得を試み、取得に成功したときのみキャッシュを置換する
 -- （鍵ロールオーバー対応。取得失敗時は既存の stale キャッシュを温存する。Issue #3）
@@ -238,11 +255,11 @@ end
 local function get_signing_key(conf, kid)
   local cache_key = jwks_cache_key(conf)
 
-  local meta, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
+  local meta, err = get_cached_metadata(conf, cache_key)
   if not meta then
-    -- load_metadata の失敗は常に Entra ID への接続・応答形式の問題であり、
-    -- 受信トークン自体の不正ではない
-    return nil, tostring(err), true
+    -- メタデータの取得失敗は Entra ID への接続・応答形式の問題、ピン不一致は
+    -- 設定とメタデータの不整合。いずれも受信トークン自体の不正ではない
+    return nil, err, true
   end
   if meta.keys[kid] then
     return { jwk_json = meta.keys[kid], issuer = meta.issuer }
@@ -291,6 +308,13 @@ local function get_signing_key(conf, kid)
   end
   -- 再取得成功: 失敗フラグを解除する（以後の抑止期間中の未知 kid は 401 分類に戻る）
   last_refetch_failed[cache_key] = nil
+
+  -- renew が返した値にもピンを毎回照合する。renew は他ワーカーが先に更新した値を
+  -- そのまま返すことがあり（バージョン比較によるコールバックスキップ）、その場合は
+  -- この conf の load_metadata（ロード時ピン照合）を経由していないため
+  if conf.issuer ~= nil and conf.issuer ~= fresh.issuer then
+    return nil, "openid-configuration issuer does not match configured issuer", true
+  end
 
   if fresh.keys[kid] then
     return { jwk_json = fresh.keys[kid], issuer = fresh.issuer }
