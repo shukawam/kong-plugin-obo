@@ -14,6 +14,14 @@ Kong の Route に obo プラグインを設定し、実際にユーザーのト
 
 `examples/kong.yaml` に検証用の Service（upstream は `.env` の `DECK_DOWNSTREAM_URL`、すなわち token B の正規 audience である downstream API）と Route（`/downstream`）、obo プラグインの設定が定義されています。設定値は `.env` の `DECK_*` 変数から解決されます。
 
+同期の前に、`DECK_DOWNSTREAM_URL` が `https://` で始まることを確認します。token B が平文で送信されるのを防ぐため HTTPS は必須です。また、この URL は `DECK_SCOPE` の audience（token B の正規の届け先）と一致している必要があります。
+
+```bash
+set -a; source .env; set +a
+[[ "$DECK_DOWNSTREAM_URL" == https://* ]] && echo OK || echo "NG: DECK_DOWNSTREAM_URL は https:// で始まる必要があります"
+# OK
+```
+
 ```bash
 mise run gateway:diff    # 反映される差分の確認
 mise run gateway:sync    # Konnect へ反映（数秒で DP に配信される）

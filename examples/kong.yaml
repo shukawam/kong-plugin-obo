@@ -4,6 +4,8 @@ services:
   # OBO 検証用の Service/Route。
   # upstream は token B の正規の audience である downstream API（.env の DECK_DOWNSTREAM_URL）。
   # 実トークン（token B）が送られるのはこの downstream API だけ（docs/04）。
+  # DECK_DOWNSTREAM_URL は https:// 必須（token B を平文送信しないため）で、
+  # DECK_SCOPE の audience と対応する URL にすること（docs/04 §1 の sync 前確認参照）。
   # トークンなし / 不正なトークンは obo プラグインが upstream 到達前に 401 で拒否するため、
   # 配線確認（docs/04 §2）もこの Route で行う。
   - name: downstream-service
