@@ -9,6 +9,9 @@ Microsoft Entra ID の On-Behalf-Of (OBO) フローを実現する Kong Gateway 
 1. **プロトコルの詳細は必ず `docs/obo/` を参照する。** 記憶や推測で Entra ID / OAuth の
    仕様（パラメータ名・URN・クレーム・エンドポイント）を書かないこと。`docs/obo/` は
    一次情報（Microsoft Learn / IETF RFC）の裏取り済み仕様書である。
+   **注意**: `docs/` は Git 管理外（ローカル専用）のため、クローン直後の環境には存在しない。
+   その場合は README の「参考資料（一次情報）」に列挙した Microsoft Learn / RFC の URL を
+   直接参照し、必要なら WebFetch で裏取りした上で `docs/obo/` を再生成すること。
 2. **TDD を厳守する。** 実装コードを書く前に必ず失敗するテストを書く
    （Red → Green → Refactor）。superpowers:test-driven-development スキルに従うこと。
 3. **認証プラグインである。** トークン・シークレット・アサーションを絶対にログに出力しない。

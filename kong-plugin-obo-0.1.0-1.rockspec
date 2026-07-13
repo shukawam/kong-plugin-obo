@@ -5,7 +5,9 @@ local rockspec_revision = "1"
 
 local github_account_name = "shukawam"
 local github_repo_name = "kong-plugin-obo"
-local git_checkout = package_version == "dev" and "master" or package_version
+-- リリースタグ運用を始めるまでは main ブランチを参照する。
+-- リリース時は source を tag = package_version（例: "0.1.0"）へ切り替えること
+local git_checkout = "main"
 
 
 package = package_name
@@ -31,7 +33,6 @@ dependencies = {
 build = {
   type = "builtin",
   modules = {
-    -- TODO: add any additional code files added to the plugin
     ["kong.plugins."..plugin_name..".handler"] = "kong/plugins/"..plugin_name.."/handler.lua",
     ["kong.plugins."..plugin_name..".schema"] = "kong/plugins/"..plugin_name.."/schema.lua",
     ["kong.plugins."..plugin_name..".util"] = "kong/plugins/"..plugin_name.."/util.lua",
