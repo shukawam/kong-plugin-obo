@@ -714,4 +714,93 @@ describe("obo: jwt_validator (unit)", function()
       assert.is_falsy(up2)
     end)
   end)
+
+  -- Issue #13: JWK→pkey 変換のワーカーローカルメモ化。
+  -- JWKS キャッシュは shm 越し共有のため JWK を JSON 文字列で保持しており、
+  -- 毎リクエスト pkey.new(JWK) で公開鍵をパースし直していた（実測 ~3.9us/req）。
+  -- 同一 JWK JSON に対する pkey オブジェクトをワーカーローカルにメモ化して再パースを避ける。
+  -- メモのキーは JWK JSON 文字列そのもの（内容アドレス方式）なので、鍵ロールオーバーで
+  -- JWK が変われば別エントリになり、古い pkey が誤って使われることはない。
+  describe("JWK→pkey メモ化", function()
+    -- pkey.new(JWK) の呼び出し回数を数えるため resty.openssl.pkey をラップする。
+    -- 既にロード済みの fixtures（jwt/keys）は自前の local に本物の pkey を捕捉しているので
+    -- 影響を受けない。ラップ後に再 require する jwt_validator だけがカウンタ付き pkey を使う。
+    local real_pkey, jwk_new_count
+
+    before_each(function()
+      real_pkey = package.loaded["resty.openssl.pkey"]
+      jwk_new_count = 0
+      package.loaded["resty.openssl.pkey"] = setmetatable({
+        new = function(inp, opts)
+          -- format=JWK のパースだけを数える（PEM 署名などは対象外）
+          if type(opts) == "table" and opts.format == "JWK" then
+            jwk_new_count = jwk_new_count + 1
+          end
+          return real_pkey.new(inp, opts)
+        end,
+      }, { __index = real_pkey })
+      -- ワーカーローカルなメモ状態をリセットするため毎回再 require する
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    after_each(function()
+      package.loaded["resty.openssl.pkey"] = real_pkey
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    it("同一 JWK は 2 回目以降 pkey.new(JWK) を呼ばずメモから返す", function()
+      local token = make()
+
+      local claims1 = jwt_validator.validate(conf, token)
+      assert.is_truthy(claims1)
+      assert.equal(1, jwk_new_count)
+
+      -- 2 回目: JWK は同一なのでメモヒットし、pkey.new(JWK) は増えない
+      local claims2 = jwt_validator.validate(conf, token)
+      assert.is_truthy(claims2)
+      assert.equal(1, jwk_new_count)
+    end)
+
+    it("鍵ロールオーバー時に stale な pkey を使わず新しい鍵で検証する", function()
+      local pkey = real_pkey
+      local util = require "kong.plugins.obo.util"
+
+      -- 1 回目: 既定の鍵 A で検証しメモに載せる
+      local claimsA = jwt_validator.validate(conf, make())
+      assert.is_truthy(claimsA)
+
+      -- 鍵 B を新規生成し JWKS を差し替える（kid も変える = ロールオーバー相当）
+      local keyB = assert(pkey.new({ type = "RSA", bits = 2048 }))
+      local params = keyB:get_parameters()
+      local jwkB = {
+        kty = "RSA", use = "sig", kid = "rotated-key-2",
+        n = util.b64url_encode(params.n:to_binary()),
+        e = util.b64url_encode(params.e:to_binary()),
+      }
+      http_responses[JWKS_URL] = {
+        status = 200,
+        body = cjson.encode({ keys = { jwkB } }),
+      }
+
+      -- 鍵 B で署名したトークンを組み立てる（iss はメタデータの issuer と一致させる）
+      local now = ngx.time()
+      local header = { alg = "RS256", typ = "JWT", kid = "rotated-key-2" }
+      local claims = {
+        iss = MOCK_ISSUER,
+        aud = "test-client-id", sub = "test-user", exp = now + 3600, nbf = now,
+      }
+      local signing_input = util.b64url_encode(cjson.encode(header))
+          .. "." .. util.b64url_encode(cjson.encode(claims))
+      local sig = assert(keyB:sign(signing_input, "sha256"))
+      local tokenB = signing_input .. "." .. util.b64url_encode(sig)
+
+      -- stale な鍵 A の pkey を使い回していたら署名検証に失敗して nil になる
+      local claimsB, err = jwt_validator.validate(conf, tokenB)
+      assert.is_nil(err)
+      assert.is_truthy(claimsB)
+      assert.equal("test-user", claimsB.sub)
+    end)
+  end)
 end)
