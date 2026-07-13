@@ -23,11 +23,12 @@ upstream へのリクエストの `Authorization` ヘッダーを token B に差
 処理の流れ:
 
 1. `Authorization: Bearer <token A>` から受信トークンを取り出す。
-2. JWKS を用いて受信トークンの署名・`iss`・`aud`・`exp`・`nbf` を検証する。
-3. 交換済みトークンのキャッシュを確認し、なければ Entra ID のトークンエンドポイントへ
+2. JWKS を用いて受信トークンの署名・`iss`・`aud`・`exp`・`nbf` を検証する（認証）。
+3. `required_scopes` / `required_roles` を設定している場合、受信トークンの `scp` / `roles` クレームが要件を満たすか検査する（認可）。満たさなければ `403`（`insufficient_scope`）で拒否し、トークン交換は行わない。未設定なら検査しない。
+4. 交換済みトークンのキャッシュを確認し、なければ Entra ID のトークンエンドポイントへ
    OBO リクエスト（`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
    `requested_token_use=on_behalf_of`）を送って token B を取得する。
-4. upstream へのリクエストの `Authorization` ヘッダーを `Bearer <token B>` に差し替える。
+5. upstream へのリクエストの `Authorization` ヘッダーを `Bearer <token B>` に差し替える。
    受信した token A をそのまま upstream に転送することはない。
 
 ## 2. 前提: Entra ID 側のアプリ登録
@@ -151,7 +152,7 @@ export KONG_PLUGINS=bundled,obo
 | `audience` | string | 必須 | - | 受信トークンの `aud` クレームの期待値（通常は `client_id` と同じ値）。 |
 | `issuer` | string | 任意 | - | 受信トークンの `iss` クレームの期待値。省略時は `identity_base_url` と `tenant_id` から `{identity_base_url}/{tenant_id}/v2.0` の形式で導出する。 |
 | `required_scopes` | array of string | 任意 | - | 受信トークンの `scp`（委任スコープ）クレームに含まれていなければならないスコープのリスト。設定すると、指定した全スコープを持たないトークンを `403`（`insufficient_scope`）で拒否する。`scp` はユーザートークンにのみ含まれるため、これを設定すると `scp` を持たない app-only / daemon トークンも拒否される。**未設定なら `scp` の検査は行わない**（下記の注記を参照）。 |
-| `required_roles` | array of string | 任意 | - | 受信トークンの `roles`（アプリロール）クレームに含まれていなければならないロールのリスト。設定すると、指定した全ロールを持たないトークンを `403` で拒否する。未設定なら検査しない。`roles` は app-only トークンにもユーザーの割当ロールにも現れるため、「ユーザートークンかどうか」の判定には使えない。 |
+| `required_roles` | array of string | 任意 | - | 受信トークンの `roles`（アプリロール）クレームに含まれていなければならないロールのリスト。設定すると、指定した全ロールを持たないトークンを `403` で拒否する。未設定なら検査しない。`roles` は app-only トークンにもユーザーの割当ロールにも現れるため、これのみ設定した場合も**非空の `scp` クレームの存在**を併せて要求し、`scp` を持たない app-only / ID トークンは `403` で拒否する（`scp` の値の照合はしない。OBO はユーザー委任トークン専用のため）。要素は app role の「Value」（空白を含められない）を指定する。 |
 | `identity_base_url` | url | 省略可 | `https://login.microsoftonline.com` | Entra ID のベース URL。通常は変更不要（ソブリンクラウドやテストで使用）。 |
 | `token_cache_enabled` | boolean | 省略可 | `true` | 交換済みトークンをキャッシュするか。 |
 | `cache_ttl_margin` | integer (`>= 0`) | 省略可 | `30` | キャッシュ TTL を `expires_in` から何秒差し引くか（期限ギリギリのトークンを使わないための余裕、秒）。 |
