@@ -86,9 +86,9 @@ end
 -- OpenID 設定 → JWKS の順に取得し、kid → JWK(JSON文字列) のテーブルを作るローカル関数
 -- kong.cache のコールバックとして呼ばれる（キャッシュミス時のみ実行される）
 local function load_jwks(conf)
-  -- v2.0 のメタデータ URL（docs/obo/05）
-  local config_url = conf.identity_base_url .. "/" .. conf.tenant_id
-      .. "/v2.0/.well-known/openid-configuration"
+  -- v2.0 のメタデータ URL（docs/obo/05）。URL 連結は util.build_tenant_url に集約
+  local config_url = util.build_tenant_url(conf.identity_base_url, conf.tenant_id,
+      "v2.0/.well-known/openid-configuration")
   local oidc, err = http_get_json(conf, config_url)
   if not oidc then
     return nil, err
@@ -240,7 +240,7 @@ function M.validate(conf, token)
   -- iss: メタデータの issuer と完全一致が原則（docs/obo/05）。
   -- conf.issuer 未指定なら v2.0 の形式（{base}/{tenant}/v2.0）を導出する
   local expected_iss = conf.issuer
-      or (conf.identity_base_url .. "/" .. conf.tenant_id .. "/v2.0")
+      or util.build_tenant_url(conf.identity_base_url, conf.tenant_id, "v2.0")
   if claims.iss ~= expected_iss then
     return nil, "issuer mismatch"
   end

@@ -43,6 +43,73 @@ describe("obo: util (unit)", function()
   end)
 end)
 
+describe("obo: util.build_tenant_url (unit)", function()
+  local util
+
+  setup(function()
+    util = require("kong.plugins.obo.util")
+  end)
+
+  teardown(function()
+    package.loaded["kong.plugins.obo.util"] = nil
+  end)
+
+  it("base / tenant / path を連結する", function()
+    assert.equal(
+      "https://login.microsoftonline.com/tenant-x/oauth2/v2.0/token",
+      util.build_tenant_url("https://login.microsoftonline.com", "tenant-x", "oauth2/v2.0/token"))
+  end)
+
+  it("path を省略すると base/tenant までを返す", function()
+    assert.equal(
+      "https://login.microsoftonline.com/tenant-x",
+      util.build_tenant_url("https://login.microsoftonline.com", "tenant-x"))
+  end)
+
+  it("base の末尾スラッシュを正規化して // を作らない", function()
+    -- 設定に末尾スラッシュが付いていても issuer が ...//tenant/v2.0 にならないこと
+    assert.equal(
+      "https://login.microsoftonline.com/tenant-x/v2.0",
+      util.build_tenant_url("https://login.microsoftonline.com/", "tenant-x", "v2.0"))
+  end)
+
+  it("末尾スラッシュが複数連続していても 1 個に正規化する", function()
+    assert.equal(
+      "https://login.microsoftonline.com/tenant-x/v2.0",
+      util.build_tenant_url("https://login.microsoftonline.com///", "tenant-x", "v2.0"))
+  end)
+end)
+
+describe("obo: util.url_scheme_authority (unit)", function()
+  local util
+
+  setup(function()
+    util = require("kong.plugins.obo.util")
+  end)
+
+  teardown(function()
+    package.loaded["kong.plugins.obo.util"] = nil
+  end)
+
+  it("scheme と authority（host:port）を取り出す", function()
+    local scheme, authority = util.url_scheme_authority("https://login.microsoftonline.com/tenant/v2.0")
+    assert.equal("https", scheme)
+    assert.equal("login.microsoftonline.com", authority)
+  end)
+
+  it("ポート付きの authority を取り出す", function()
+    local scheme, authority = util.url_scheme_authority("http://127.0.0.1:10999/tenant/discovery/v2.0/keys")
+    assert.equal("http", scheme)
+    assert.equal("127.0.0.1:10999", authority)
+  end)
+
+  it("絶対 URL でなければ nil を返す", function()
+    assert.is_nil(util.url_scheme_authority("/relative/path"))
+    assert.is_nil(util.url_scheme_authority(nil))
+    assert.is_nil(util.url_scheme_authority(12345))
+  end)
+end)
+
 describe("obo: fixtures (unit)", function()
   it("jwt.make が作ったトークンをフィクスチャの公開鍵で検証できる", function()
     local pkey = require "resty.openssl.pkey"
