@@ -9,7 +9,7 @@
 #   scripts/upload-plugin-schema.sh upload   # 登録（既存なら更新）
 #   scripts/upload-plugin-schema.sh verify   # 登録状態の確認のみ（読み取り専用）
 #
-# 必要な環境変数（mise が .env から解決する。mise run schema-upload を推奨）:
+# 必要な環境変数（mise が .env から解決する。mise run schema:upload を推奨）:
 #   DECK_KONNECT_TOKEN               Konnect のパーソナルアクセストークン（deck と共用）
 #   DECK_KONNECT_CONTROL_PLANE_NAME  対象 Control Plane の名前（deck と共用）
 # 任意:
@@ -74,7 +74,7 @@ fi
 if [ "$MODE" = "verify" ]; then
   # verify モードはここで終了（読み取り専用）
   [ "$REGISTERED" = true ] && echo "OK: スキーマは登録されています" || {
-    echo "NG: スキーマが未登録です。'mise run schema-upload' で登録してください"; exit 1; }
+    echo "NG: スキーマが未登録です。'mise run schema:upload' で登録してください"; exit 1; }
   exit 0
 fi
 

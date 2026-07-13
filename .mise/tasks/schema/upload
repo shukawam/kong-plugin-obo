@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Upload obo plugin schema to Konnect Control Plane (hybrid mode)"
+#MISE dir="{{ config_root }}"
+set -euo pipefail
+
+exec scripts/upload-plugin-schema.sh upload

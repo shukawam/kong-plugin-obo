@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Diff gateway configuration against Konnect Control Plane (deck gateway diff)"
+#MISE dir="{{ config_root }}/examples"
+set -euo pipefail
+
+deck gateway diff kong.yaml
