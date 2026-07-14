@@ -83,8 +83,10 @@ fi
 BODY=$(jq -n --rawfile schema "$SCHEMA_FILE" '{"lua_schema": $schema}')
 
 if [ "$REGISTERED" = true ]; then
-  echo "==> 既存スキーマを更新中 (PATCH)..."
-  konnect_api PATCH "${SCHEMAS_PATH}/${PLUGIN_NAME}" --data "$BODY" >/dev/null
+  # このエンドポイントは PATCH を受け付けない（Allow ヘッダーは DELETE, GET, PUT のみ）。
+  # 更新は PUT で全体を送る
+  echo "==> 既存スキーマを更新中 (PUT)..."
+  konnect_api PUT "${SCHEMAS_PATH}/${PLUGIN_NAME}" --data "$BODY" >/dev/null
   echo "    更新しました"
 else
   echo "==> スキーマを新規登録中 (POST)..."
