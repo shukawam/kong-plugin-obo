@@ -1,8 +1,15 @@
 local typedefs = require "kong.db.schema.typedefs"
-local util = require "kong.plugins.obo.util"
 
 -- プラグイン名。ディレクトリ名（kong/plugins/obo）と一致している必要がある
 local PLUGIN_NAME = "obo"
+
+-- GUID（8-4-4-4-12 桁の 16 進）の Lua パターン。%x は大文字小文字どちらの 16 進にも
+-- マッチする。本来は util.GUID_PATTERN（jwt_validator の issuer 形式検証と共用）だが、
+-- Konnect の plugin-schema 登録 API は schema.lua を単体でサンドボックス評価するため、
+-- kong.plugins.obo.util のようなカスタムモジュールへの require が拒否される
+-- （400: "require not permitted in sandbox"）。そのためここでは複製して自己完結させる
+local GUID_PATTERN =
+  "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 
 -- tenant_id は URL パス（メタデータ / トークンエンドポイント / issuer）にそのまま連結される。
 -- Microsoft Learn（v2-protocols-oidc）のとおり {tenant} には「テナント ID（GUID）または
@@ -31,7 +38,7 @@ local schema = {
           -- match_any は「いずれかのパターンに一致すれば受理」する Kong スキーマの検証子
           { tenant_id = { type = "string", required = true,
               match_any = {
-                patterns = { util.GUID_PATTERN, TENANT_ID_DOMAIN_PATTERN },
+                patterns = { GUID_PATTERN, TENANT_ID_DOMAIN_PATTERN },
                 err = "must be a tenant GUID or a tenant domain name (e.g. contoso.onmicrosoft.com)",
               } } },
 

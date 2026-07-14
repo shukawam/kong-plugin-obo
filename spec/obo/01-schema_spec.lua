@@ -262,4 +262,28 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.required_roles)
   end)
 
+  -- Konnect の plugin-schema 登録 API（POST/PATCH .../plugin-schemas）は schema.lua を
+  -- 単体でサンドボックス評価する。プラグインディレクトリ全体はアップロードされないため、
+  -- kong.plugins.obo.util のようなカスタムモジュールへの require はサンドボックスで拒否され、
+  -- 登録が 400（validation error: require not permitted in sandbox）で失敗する。
+  -- schema.lua はこの制約下でも自己完結して読み込めなければならない
+  it("schema.lua は自身以外のカスタムプラグインモジュールを require しない（Konnect plugin-schema サンドボックス対応）", function()
+    -- pongo コンテナ内では busted の実行時カレントディレクトリがリポジトリ直下と限らないため、
+    -- このテストファイル自身のソースパス（debug.getinfo）からリポジトリルートを逆算する
+    local this_file = debug.getinfo(1, "S").source:sub(2)  -- 先頭の "@" を除去
+    local repo_root = assert(this_file:match("^(.*)/spec/obo/01%-schema_spec%.lua$"),
+      "リポジトリルートを特定できません: " .. this_file)
+    local path = repo_root .. "/kong/plugins/" .. PLUGIN_NAME .. "/schema.lua"
+    local f = assert(io.open(path, "r"))
+    local source = f:read("*a")
+    f:close()
+
+    -- "kong.plugins.<PLUGIN_NAME>." 配下（= 自作モジュール）を require していないか確認する。
+    -- typedefs 等の "kong." コア組み込みモジュールは Konnect のサンドボックスでも許可されるため対象外
+    local forbidden = source:match("require%s*%(?%s*[\"']kong%.plugins%." .. PLUGIN_NAME .. "%.")
+    assert.is_nil(forbidden,
+      "schema.lua がカスタムモジュールを require しています（Konnect のサンドボックスで 400 になります）: "
+        .. tostring(forbidden))
+  end)
+
 end)
