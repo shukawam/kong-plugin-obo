@@ -18,10 +18,10 @@ services:
       KONG_DATABASE: off
       KONG_VITALS: off
       KONG_CLUSTER_MTLS: pki
-      KONG_CLUSTER_CONTROL_PLANE: ${PREFIX:-}.us.cp.konghq.com:443
-      KONG_CLUSTER_SERVER_NAME: ${PREFIX:-}.us.cp.konghq.com
-      KONG_CLUSTER_TELEMETRY_ENDPOINT: ${PREFIX:-}.us.tp.konghq.com:443
-      KONG_CLUSTER_TELEMETRY_SERVER_NAME: ${PREFIX:-}.us.tp.konghq.com
+      KONG_CLUSTER_CONTROL_PLANE: ${PREFIX:?PREFIX が未設定です。.env に記入し、起動前に set -a; source .env; set +a で読み込み直してください}.us.cp.konghq.com:443
+      KONG_CLUSTER_SERVER_NAME: ${PREFIX:?PREFIX が未設定です。.env に記入し、起動前に set -a; source .env; set +a で読み込み直してください}.us.cp.konghq.com
+      KONG_CLUSTER_TELEMETRY_ENDPOINT: ${PREFIX:?PREFIX が未設定です。.env に記入し、起動前に set -a; source .env; set +a で読み込み直してください}.us.tp.konghq.com:443
+      KONG_CLUSTER_TELEMETRY_SERVER_NAME: ${PREFIX:?PREFIX が未設定です。.env に記入し、起動前に set -a; source .env; set +a で読み込み直してください}.us.tp.konghq.com
       KONG_CLUSTER_CERT: /etc/kong/cluster-certs/cluster.crt
       KONG_CLUSTER_CERT_KEY: /etc/kong/cluster-certs/cluster.key
       KONG_LUA_SSL_TRUSTED_CERTIFICATE: system

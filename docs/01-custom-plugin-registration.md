@@ -5,7 +5,7 @@ Konnect のハイブリッドモードでは、Control Plane (CP) に obo プラ
 ## 前提
 
 - Konnect アカウントと Control Plane が作成済みであること
-- ツール: `mise` / `deck` / `jq` / `curl`
+- ツール: `curl` / `jq`
 - Konnect のパーソナルアクセストークン（[Konnect の Personal Access Tokens ページ](https://cloud.konghq.com/global/account/tokens)で発行）
 
 ## 手順
@@ -25,8 +25,11 @@ DECK_KONNECT_CONTROL_PLANE_NAME=<対象 Control Plane 名>
 
 ### 2. スキーマを登録する
 
+`.env` を読み込んでから登録スクリプトを実行します。
+
 ```bash
-mise run schema:upload
+set -a; source .env; set +a
+scripts/upload-plugin-schema.sh upload
 ```
 
 `scripts/upload-plugin-schema.sh` が Control Plane 名から ID を解決し、`kong/plugins/obo/schema.lua` を Konnect API で登録します（登録済みの場合は更新）。
@@ -34,7 +37,7 @@ mise run schema:upload
 ### 3. 登録を確認する
 
 ```bash
-mise run schema:verify
+scripts/upload-plugin-schema.sh verify
 ```
 
 `OK: スキーマは登録されています` と表示されれば完了です。
@@ -47,7 +50,8 @@ mise run schema:verify
 
 ## 補足
 
-- schema.lua を変更した場合は `mise run schema:upload` を再実行すると更新されます
+- [mise](https://mise.jdx.dev/) を使っている場合は `mise run schema:upload` / `mise run schema:verify` でも実行できます（mise が `.env` を自動で読み込むため `source` は不要）
+- schema.lua を変更した場合は `scripts/upload-plugin-schema.sh upload` を再実行すると更新されます
 - 登録後、Konnect の Plugins 一覧に `obo` が表示され、Service / Route に設定できるようになります
 
 次: [ガイド 02: Data Plane のビルドと起動](02-data-plane-build.md)

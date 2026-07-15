@@ -112,25 +112,16 @@ export KONG_PLUGINS=bundled,obo
 
 ### 3.5 コンテナでの起動（Konnect データプレーン）
 
-> **ステップバイステップのガイドは [`docs/`](./docs/) にあります**:
-> [01 カスタムプラグイン登録](./docs/01-custom-plugin-registration.md) /
-> [02 Data Plane のビルドと起動](./docs/02-data-plane-build.md) /
-> [03 Entra ID のセットアップ](./docs/03-entra-id-setup.md) /
-> [04 OBO トークン交換の確認](./docs/04-obo-verification.md)
-
 リポジトリ同梱の `compose.yaml` は、obo プラグイン入りの Kong Gateway を
 **Konnect のデータプレーン (DP)** として起動する構成です
 （Observability スタック otel-lgtm も含みます）。
 
-流れの概要（詳細は上記ガイド 01〜04）:
+セットアップは以下のステップバイステップガイドに沿って、01 から順に実施してください:
 
-1. **カスタムプラグインのスキーマ登録**（ガイド 01）: `mise run schema:upload`
-2. **DP のビルドと起動**（ガイド 02）: cluster 証明書を `cluster-certs/` に配置し
-   `docker compose up --build`（`cluster-certs/` は gitignore / dockerignore 済み。
-   コミット・イメージ焼き込み禁止）
-3. **Entra ID のアプリ登録**（ガイド 03）
-4. **ゲートウェイ設定の同期と検証**（ガイド 04）: `mise run gateway:sync` →
-   device code flow でトークンを取得して確認
+1. [ガイド 01: カスタムプラグイン登録](./docs/01-custom-plugin-registration.md)
+2. [ガイド 02: Data Plane のビルドと起動](./docs/02-data-plane-build.md)
+3. [ガイド 03: Entra ID のセットアップ](./docs/03-entra-id-setup.md)
+4. [ガイド 04: OBO トークン交換の確認](./docs/04-obo-verification.md)
 
 切り分けには `compose.yaml` の `KONG_LOG_LEVEL: debug`（設定済み）のログを
 `docker compose logs kong | grep "obo:"` で確認してください。
