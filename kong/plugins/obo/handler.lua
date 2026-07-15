@@ -17,7 +17,7 @@ local plugin = {
   -- PRIORITY はプラグインの実行順序を決める（大きいほど先）。
   -- 認証系として一般的な位置の 1000 を使う
   PRIORITY = 1000,
-  VERSION = "0.2.1",
+  VERSION = "0.2.2",
 }
 
 -- Authorization ヘッダーから Bearer トークンを取り出すローカル関数
