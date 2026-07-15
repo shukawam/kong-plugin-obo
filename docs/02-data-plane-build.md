@@ -6,6 +6,7 @@ obo プラグインを組み込んだ Kong Gateway を、Konnect の Data Plane 
 
 - Docker / Docker Compose v2
 - [ガイド 01](01-custom-plugin-registration.md) の完了（CP へのスキーマ登録）
+- ローカルの `8000` / `8100` / `3000` / `4317` / `4318` 番ポートが空いていること（別の Kong Gateway や他のコンテナが使用中だとポート衝突で起動に失敗します。`docker ps` 等で確認し、使用中のものは先に停止してください）
 
 ## 手順
 

@@ -9,7 +9,8 @@
 #   scripts/upload-plugin-schema.sh upload   # 登録（既存なら更新）
 #   scripts/upload-plugin-schema.sh verify   # 登録状態の確認のみ（読み取り専用）
 #
-# 必要な環境変数（mise が .env から解決する。mise run schema:upload を推奨）:
+# 必要な環境変数（`set -a; source .env; set +a` で .env から読み込む。
+# mise 利用時は `mise run schema:upload` でも可（mise が .env を自動で読み込む））:
 #   DECK_KONNECT_TOKEN               Konnect のパーソナルアクセストークン（deck と共用）
 #   DECK_KONNECT_CONTROL_PLANE_NAME  対象 Control Plane の名前（deck と共用）
 # 任意:
@@ -31,7 +32,7 @@ MODE="${1:-upload}"
 for cmd in curl jq; do
   command -v "$cmd" >/dev/null || { echo "ERROR: $cmd が見つかりません" >&2; exit 1; }
 done
-: "${DECK_KONNECT_TOKEN:?ERROR: DECK_KONNECT_TOKEN が未設定です（.env を確認。mise run 経由で実行すること）}"
+: "${DECK_KONNECT_TOKEN:?ERROR: DECK_KONNECT_TOKEN が未設定です（.env を確認し、'set -a; source .env; set +a' で読み込むこと）}"
 : "${DECK_KONNECT_CONTROL_PLANE_NAME:?ERROR: DECK_KONNECT_CONTROL_PLANE_NAME が未設定です（.env を確認）}"
 [ -f "$SCHEMA_FILE" ] || { echo "ERROR: schema ファイルがありません: $SCHEMA_FILE" >&2; exit 1; }
 
@@ -74,7 +75,7 @@ fi
 if [ "$MODE" = "verify" ]; then
   # verify モードはここで終了（読み取り専用）
   [ "$REGISTERED" = true ] && echo "OK: スキーマは登録されています" || {
-    echo "NG: スキーマが未登録です。'mise run schema:upload' で登録してください"; exit 1; }
+    echo "NG: スキーマが未登録です。'scripts/upload-plugin-schema.sh upload' で登録してください"; exit 1; }
   exit 0
 fi
 
