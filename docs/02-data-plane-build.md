@@ -25,7 +25,10 @@ obo プラグインを組み込んだ Kong Gateway を、Konnect の Data Plane 
 
 ### 2. ビルドして起動する
 
+`.env` を記入・変更した後は、必ず `.env` を読み込み直してから起動します。Docker Compose は**シェルにエクスポート済みの環境変数を `.env` より優先する**ため、[ガイド 01](01-custom-plugin-registration.md) の `source .env` 時点の古い値（空の `PREFIX`）がシェルに残っていると、`.env` に記入しても空のまま起動されてしまいます。
+
 ```bash
+set -a; source .env; set +a
 docker compose up --build -d
 ```
 
