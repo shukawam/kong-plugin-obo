@@ -84,7 +84,8 @@ describe("obo: jwt_validator (unit)", function()
   end
 
   -- v1.0 形式（ver = "1.0"、iss 末尾スラッシュ付き）のテストトークンを作るローカル関数
-  local function make_v1(claims_override)
+  -- header_override は make() と同じく、kid 差し替え等の異常系・鍵ロールオーバーのテスト用
+  local function make_v1(claims_override, header_override)
     claims_override = claims_override or {}
     if claims_override.ver == nil then
       claims_override.ver = "1.0"
@@ -92,7 +93,7 @@ describe("obo: jwt_validator (unit)", function()
     if claims_override.iss == nil then
       claims_override.iss = MOCK_V1_ISSUER
     end
-    return jwt.make(claims_override)
+    return jwt.make(claims_override, header_override)
   end
 
   before_each(function()
@@ -1020,6 +1021,50 @@ describe("obo: jwt_validator (unit)", function()
       assert.is_nil(claims)
       assert.is_string(err)
       assert.is_truthy(is_upstream)
+    end)
+
+    it("鍵ロールオーバー後に新しい kid で届いた v1.0 トークンも issuer_v1 が伝搬して受理される（renew 経路の回帰ガード）", function()
+      -- get_signing_key は未知 kid を検出すると kong.cache:renew でメタデータを再取得し、
+      -- その結果（issuer_v1 を含む）をそのまま返す（jwt_validator.lua の get_signing_key
+      -- 末尾、fresh.keys[kid] が見つかったときの return 文）。この renew 経路で issuer_v1 の
+      -- 伝搬が抜け落ちる回帰が起きると、鍵ロールオーバー直後に届いた v1.0 トークンだけが
+      -- 「issuer mismatch」で 401 になる（v2.0 トークンや、ロールオーバー後にキャッシュが
+      -- 温まった後の v1.0 トークンでは再現しない、renew 経路特有の回帰のため見逃しやすい）。
+      --
+      -- last_refetch（未知 kid 再取得のデバウンス用）はモジュールローカルな state なので、
+      -- 他テストで進んだ状態を持ち越さないよう、ここでモジュールを再 require して
+      -- クリーンな状態から始める（674 行目付近の既存ロールオーバーテストと同じ作法）
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+
+      -- ロールオーバーを模す: v1.0 JWKS エンドポイントは 1 回目（kong.cache:get 経由の
+      -- 通常取得）に旧鍵のみ、2 回目（未知 kid 検出後の kong.cache:renew 経由の再取得）で
+      -- 新 kid を含む JWKS を返す。新鍵はテスト鍵の公開鍵を流用し kid だけ変える
+      -- （署名はテスト秘密鍵で有効なまま。727 行目付近の v2.0 ロールオーバーテストと同じ手法）
+      local new_kid = "test-key-2"
+      local rotated_jwk = keys.jwk()
+      rotated_jwk.kid = new_kid
+
+      local v1_jwks_seq = 0
+      http_responses[V1_JWKS_URL] = function()
+        v1_jwks_seq = v1_jwks_seq + 1
+        if v1_jwks_seq == 1 then
+          return { status = 200, body = cjson.encode({ keys = { keys.jwk() } }) }
+        end
+        return { status = 200, body = cjson.encode({ keys = { keys.jwk(), rotated_jwk } }) }
+      end
+
+      local token = make_v1(nil, { kid = new_kid })
+      local claims, err = jwt_validator.validate(conf, token)
+
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.equal("test-user", claims.sub)
+
+      -- 後続テストへモジュール state（last_refetch 等）を持ち越さないよう、ここでも
+      -- 再 require してクリーンな状態に戻す
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
     end)
   end)
 

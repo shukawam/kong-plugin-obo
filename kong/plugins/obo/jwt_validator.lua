@@ -360,7 +360,8 @@ end
 -- 指す別のプラグイン設定（別ルート等）とキャッシュエントリが共有されるため、
 -- ロード時（キャッシュミス時）の照合だけではキャッシュヒット経路でピンが迂回されてしまう。
 -- 正の防御としてここで毎回照合する（文字列比較 1 回なのでコストは無視できる）。
--- @return メタデータテーブル { issuer, keys }。失敗時は nil, err
+-- @return メタデータテーブル { issuer, issuer_v1, keys }。
+--         issuer_v1 は allow_v1_tokens 無効時は nil。失敗時は nil, err
 local function get_cached_metadata(conf, cache_key)
   local meta, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
   if not meta then

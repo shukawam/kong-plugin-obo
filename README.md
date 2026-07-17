@@ -258,7 +258,7 @@ services:
 
 | ステータス | 意味 |
 |---|---|
-| `401 Unauthorized` | `Authorization` ヘッダーがない/`Bearer` 形式でない、受信トークンの検証失敗（署名・`iss`・`aud`・`exp`・`nbf` 不一致）、または Entra ID がトークン交換を拒否した場合。`WWW-Authenticate` ヘッダーに、無害化した OAuth エラーコードと（Entra ID が返した場合）Base64 エンコードされたクレームチャレンジ（`claims`）を付与する。 |
+| `401 Unauthorized` | `Authorization` ヘッダーがない/`Bearer` 形式でない、受信トークンの検証失敗（署名・`iss`・`aud`・`exp`・`nbf`・`ver` 不一致。`allow_v1_tokens` 無効時の v1.0 トークンや `ver` 欠落・未知の値も含む）、または Entra ID がトークン交換を拒否した場合。`WWW-Authenticate` ヘッダーに、無害化した OAuth エラーコードと（Entra ID が返した場合）Base64 エンコードされたクレームチャレンジ（`claims`）を付与する。 |
 | `403 Forbidden` | トークンの**認証**は成功したが、`required_scopes` / `required_roles` で要求した委任スコープ（`scp`）・アプリロール（`roles`）を満たさない場合（権限不足）。`WWW-Authenticate: Bearer error="insufficient_scope"` を付与する（[RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) §3.1）。どのスコープ/ロールが不足したかはレスポンスに含めない。 |
 | `502 Bad Gateway` | Entra ID への到達性・応答に問題がある場合（OpenID configuration/JWKS の取得失敗、トークン交換リクエストでの IdP 側 5xx やネットワークエラーなど）。受信トークン自体の検証結果ではなく IdP 側の障害であることを示す。 |
 | `500 Internal Server Error` | 上記以外の想定外のエラー。 |
