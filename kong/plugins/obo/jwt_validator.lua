@@ -403,11 +403,31 @@ function M.validate(conf, token)
   -- ---- クレーム検証（署名検証が通ってから行う）----
   local claims = jwt.payload
 
-  -- iss: メタデータの issuer と完全一致を要求する（docs/obo/05: OpenID Connect Core の
-  -- 「メタデータの Issuer Identifier と iss クレームの完全一致」）。
-  -- 検証済みメタデータ issuer が唯一の期待値であり、conf.issuer は
-  -- メタデータ issuer のピンとして load_metadata 側で照合済み
-  if claims.iss ~= key.issuer then
+  -- iss: 期待値を ver クレームで分岐する。ver は署名済みペイロード内にあるため、
+  -- 署名検証を通過した後は改ざんの心配なく分岐に使える。
+  -- 期待値はどの分岐でも「検証済みメタデータ由来の issuer」のみ（fail-close モデル。
+  -- conf.issuer は v2.0 メタデータ issuer のピンとして load_metadata 側で照合済み）:
+  --   ver = "2.0" → v2.0 メタデータの issuer（docs/obo/05: OpenID Connect Core の
+  --                 「メタデータの Issuer Identifier と iss クレームの完全一致」）
+  --   ver = "1.0" → allow_v1_tokens 有効時のみ、v1.0 メタデータの issuer
+  --                 （https://sts.windows.net/{tid}/ 形式。docs/obo/05）
+  --   それ以外（欠落・未知の値）→ 拒否（Entra のアクセストークンは必ず ver を含む）
+  local expected_iss
+  if claims.ver == "2.0" then
+    expected_iss = key.issuer
+  elseif claims.ver == "1.0" and conf.allow_v1_tokens then
+    -- issuer_v1 は allow_v1_tokens 有効時のメタデータロードで必ず設定される（fail-close。
+    -- 万一 nil でも「iss ~= nil」で必ず不一致になり、受理側に倒れることはない）
+    expected_iss = key.issuer_v1
+  elseif claims.ver == "1.0" then
+    -- 診断ヒント（debug ログ専用。handler がレスポンスに出さないことは既存方針のまま）。
+    -- 恒久対処は middle-tier アプリの api.requestedAccessTokenVersion を 2 にすること
+    -- （docs/obo/08 §2.3）。アプリ登録を変更できない場合のみ allow_v1_tokens を使う
+    return nil, "v1.0 token rejected: set requestedAccessTokenVersion=2 on the app registration (docs/obo/08), or enable allow_v1_tokens"
+  else
+    return nil, "unsupported or missing ver claim"
+  end
+  if claims.iss ~= expected_iss then
     return nil, "issuer mismatch"
   end
 

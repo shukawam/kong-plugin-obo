@@ -18,13 +18,16 @@ local M = {}
 function M.make(claims_override, header_override)
   local now = ngx.time()
 
-  -- 既定クレーム: jwt_validator のテスト・統合テストの「正しいトークン」の姿
+  -- 既定クレーム: jwt_validator のテスト・統合テストの「正しいトークン」の姿。
+  -- ver は Entra のアクセストークンが必ず含むクレームで、既定は v2.0 形式とする
+  -- （v1.0 形式のテストは ver = "1.0" と iss の上書きで作る）
   local claims = {
     iss = "https://login.microsoftonline.com/test-tenant/v2.0",
     aud = "test-client-id",
     sub = "test-user",
     exp = now + 3600,
     nbf = now,
+    ver = "2.0",
   }
   for k, v in pairs(claims_override or {}) do
     -- header_override と同様に、false を渡すとそのキーを削除する

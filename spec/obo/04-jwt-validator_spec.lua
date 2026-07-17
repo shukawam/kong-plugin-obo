@@ -12,6 +12,10 @@ local MOCK_ISSUER = MOCK_BASE .. "/" .. TENANT .. "/v2.0"
 local CONFIG_URL  = MOCK_BASE .. "/" .. TENANT .. "/v2.0/.well-known/openid-configuration"
 local JWKS_URL    = MOCK_BASE .. "/" .. TENANT .. "/discovery/v2.0/keys"
 
+-- v1.0 形式の issuer（末尾スラッシュ付き）。実 Entra では https://sts.windows.net/{tid}/ だが、
+-- プラグインの検証は「ホスト固定」ではなく「テナント GUID の一致」なのでモックホストで表す
+local MOCK_V1_ISSUER = MOCK_BASE .. "/" .. TENANT .. "/"
+
 describe("obo: jwt_validator (unit)", function()
   local jwt_validator, jwt, keys
   local conf
@@ -267,6 +271,27 @@ describe("obo: jwt_validator (unit)", function()
 
   it("iss がメタデータの issuer と一致しないトークンを拒否する", function()
     local token = make({ iss = "https://evil.example/" .. TENANT .. "/v2.0" })
+    assert.is_nil(jwt_validator.validate(conf, token))
+  end)
+
+  it("allow_v1_tokens 未設定では v1.0 トークンを拒否し、診断ヒントを返す", function()
+    -- ver = "1.0" のトークンは既定では受け付けない。エラー理由（debug ログ専用）に
+    -- 恒久対処（requestedAccessTokenVersion=2）へのヒントを含めることで、
+    -- 「issuer mismatch」だけでは原因に気づけない問題（設計書 §10 の教訓）を解消する
+    local token = make({ ver = "1.0", iss = MOCK_V1_ISSUER })
+    local claims, err = jwt_validator.validate(conf, token)
+    assert.is_nil(claims)
+    assert.is_truthy(err:find("requestedAccessTokenVersion", 1, true))
+  end)
+
+  it("ver クレームが欠落したトークンを拒否する", function()
+    -- Entra のアクセストークンは必ず ver を含む。欠落は Entra 由来でないか異常なトークン
+    local token = make({ ver = false })
+    assert.is_nil(jwt_validator.validate(conf, token))
+  end)
+
+  it("未知の ver（1.0 / 2.0 以外）のトークンを拒否する", function()
+    local token = make({ ver = "3.0" })
     assert.is_nil(jwt_validator.validate(conf, token))
   end)
 
@@ -888,6 +913,7 @@ describe("obo: jwt_validator (unit)", function()
       local claims = {
         iss = MOCK_ISSUER,
         aud = "test-client-id", sub = "test-user", exp = now + 3600, nbf = now,
+        ver = "2.0",
       }
       local signing_input = util.b64url_encode(cjson.encode(header))
           .. "." .. util.b64url_encode(cjson.encode(claims))
