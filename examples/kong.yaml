@@ -30,3 +30,6 @@ services:
             - ${{ env "DECK_SCOPE" }}
           audiences:
             - ${{ env "DECK_AUDIENCE" }}
+          # v1.0 形式のトークンも受理する場合のみ有効化する（既定 false。docs/03 §3.2 参照）。
+          # v1/v2 混在時は audiences に api://<client-id> 形式も並べること
+          # allow_v1_tokens: true
