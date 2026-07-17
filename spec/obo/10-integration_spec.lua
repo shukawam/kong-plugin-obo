@@ -16,6 +16,10 @@ local MOCK_TOKEN_URL = MOCK_IDP .. "/" .. TENANT_ID .. "/oauth2/v2.0/token"
 -- 受信トークンの iss は常にメタデータの issuer と完全一致を要求されるため、
 -- テストトークンの iss を既定でこれに合わせる
 local MOCK_ISSUER = MOCK_IDP .. "/" .. TENANT_ID .. "/v2.0"
+-- モック IdP の v1.0 メタデータが自己申告する issuer（{base}/{tenant}/ 末尾スラッシュ付き）。
+-- 実 Entra では https://sts.windows.net/{tid}/ だが、プラグインの検証はホスト固定ではなく
+-- 「テナント GUID の一致」なのでモックホストで表す
+local MOCK_V1_ISSUER = MOCK_IDP .. "/" .. TENANT_ID .. "/"
 
 -- 既定でモックのメタデータ issuer に一致する iss を持つテスト JWT を作るローカル関数
 local function make_token(claims_override)
@@ -117,6 +121,23 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
           required_scopes = { "access_as_user" },
+        },
+      }
+
+      -- v1.0 トークン受理ルート: allow_v1_tokens を有効にし、aud は両形式を許容する
+      local route5 = bp.routes:insert({ hosts = { "obo-v1.example" } })
+      bp.plugins:insert {
+        name = PLUGIN_NAME,
+        route = { id = route5.id },
+        config = {
+          tenant_id = TENANT_ID,
+          client_id = "test-client-id",
+          client_secret = "test-secret",
+          scopes = { "api://downstream/.default" },
+          audiences = { "test-client-id", "api://test-client-id" },
+          allow_v1_tokens = true,
+          identity_base_url = MOCK_IDP,
+          ssl_verify = false,
         },
       }
 
@@ -362,6 +383,34 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
         client = helpers.proxy_client()
       end
       assert.equal(before + 1, token_calls())  -- 2 リクエストで交換は 1 回だけ
+    end)
+
+    it("v1.0 トークン（allow_v1_tokens ルート）: 200 で交換される", function()
+      -- ver = "1.0"・iss 末尾スラッシュ・aud は App ID URI 形式という v1.0 の典型形
+      local token = jwt.make({ ver = "1.0", iss = MOCK_V1_ISSUER,
+                               aud = "api://test-client-id", sub = "v1-user" })
+      local r = client:get("/request", {
+        headers = { host = "obo-v1.example", authorization = "Bearer " .. token },
+      })
+      assert.response(r).has.status(200)
+      local auth = assert.request(r).has.header("authorization")
+      assert.equal("Bearer mock-exchanged-token", auth)
+    end)
+
+    it("v2.0 トークンも allow_v1_tokens ルートで引き続き 200（混在運用）", function()
+      local r = client:get("/request", {
+        headers = { host = "obo-v1.example",
+                    authorization = "Bearer " .. make_token({ sub = "v1-route-v2-user" }) },
+      })
+      assert.response(r).has.status(200)
+    end)
+
+    it("v1.0 トークンを既定ルート（allow_v1_tokens なし）に送ると 401", function()
+      local token = jwt.make({ ver = "1.0", iss = MOCK_V1_ISSUER, aud = "test-client-id" })
+      local r = client:get("/request", {
+        headers = { host = "obo.example", authorization = "Bearer " .. token },
+      })
+      assert.response(r).has.status(401)
     end)
 
   end)
