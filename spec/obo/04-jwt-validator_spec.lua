@@ -1054,7 +1054,7 @@ describe("obo: jwt_validator (unit)", function()
     it("鍵ロールオーバー後に新しい kid で届いた v1.0 トークンも issuer_v1 が伝搬して受理される（renew 経路の回帰ガード）", function()
       -- get_signing_key は未知 kid を検出すると kong.cache:renew でメタデータを再取得し、
       -- その結果（issuer_v1 を含む）をそのまま返す（jwt_validator.lua の get_signing_key
-      -- 末尾、fresh.keys[kid] が見つかったときの return 文）。この renew 経路で issuer_v1 の
+      -- 末尾、fresh_key_set[kid] が見つかったときの return 文）。この renew 経路で issuer_v1 の
       -- 伝搬が抜け落ちる回帰が起きると、鍵ロールオーバー直後に届いた v1.0 トークンだけが
       -- 「issuer mismatch」で 401 になる（v2.0 トークンや、ロールオーバー後にキャッシュが
       -- 温まった後の v1.0 トークンでは再現しない、renew 経路特有の回帰のため見逃しやすい）。

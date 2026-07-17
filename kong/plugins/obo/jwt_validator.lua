@@ -325,7 +325,7 @@ local function load_metadata(conf)
   -- ---- v1.0 メタデータ（allow_v1_tokens 有効時のみ）----
   local issuer_v1
   local keys_v1
-  if conf.allow_v1_tokens then
+  if conf.allow_v1_tokens == true then
     -- v1.0 の OpenID configuration は /v2.0 を含まないパス
     -- （docs/obo/05: v1.0 トークンは v1.0 メタデータで検証する）
     local v1_config_url = util.build_tenant_url(conf.identity_base_url, conf.tenant_id,
@@ -387,8 +387,8 @@ end
 -- 指す別のプラグイン設定（別ルート等）とキャッシュエントリが共有されるため、
 -- ロード時（キャッシュミス時）の照合だけではキャッシュヒット経路でピンが迂回されてしまう。
 -- 正の防御としてここで毎回照合する（文字列比較 1 回なのでコストは無視できる）。
--- @return メタデータテーブル { issuer, issuer_v1, keys }。
---         issuer_v1 は allow_v1_tokens 無効時は nil。失敗時は nil, err
+-- @return メタデータテーブル { issuer, issuer_v1, keys_v2, keys_v1 }。
+--         issuer_v1 / keys_v1 は allow_v1_tokens 無効時は nil。失敗時は nil, err
 local function get_cached_metadata(conf, cache_key)
   local meta, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
   if not meta then
@@ -552,7 +552,7 @@ function M.validate(conf, token)
   local expected_iss
   if claims.ver == "2.0" then
     expected_iss = key.issuer
-  elseif claims.ver == "1.0" and conf.allow_v1_tokens then
+  elseif claims.ver == "1.0" and conf.allow_v1_tokens == true then
     -- issuer_v1 は allow_v1_tokens 有効時のメタデータロードで必ず設定される（fail-close。
     -- 万一 nil でも「iss ~= nil」で必ず不一致になり、受理側に倒れることはない）
     expected_iss = key.issuer_v1
