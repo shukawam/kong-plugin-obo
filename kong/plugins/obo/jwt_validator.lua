@@ -233,8 +233,10 @@ end
 -- 多くは "{tenantid}" プレースホルダ入り、一部は具体的なテナント GUID）。
 -- 存在する場合はプレースホルダを実テナントに置換した上で expected_issuer と
 -- 完全一致しない鍵は取り込まない（他 issuer の鍵での署名検証を防ぐ）。
--- 既に by_kid にある kid は上書きしない（v2.0 → v1.0 の順に呼ぶことで、kid 衝突時は
--- v2.0 側を優先する決定的な規則にする。実 Entra では同一鍵のはずだが規則として明示する）
+-- 既に by_kid にある kid は上書きしない（同一 JWKS 内で kid が重複した場合に、後から
+-- 出てきた不正・破損した鍵に差し替わってしまうことを防ぐ保険）。
+-- v1.0 / v2.0 の鍵は呼び出し側（load_metadata）が別々のマップに集めるため、
+-- 「バージョン間で kid が衝突したときにどちらを優先するか」という概念自体がなくなっている
 -- @param jwks_keys JWKS の keys 配列
 -- @param expected_issuer この JWKS の鍵に期待する issuer（検証済みメタデータ issuer）
 -- @param issuer_tenant {tenantid} プレースホルダの置換に使うテナント GUID
@@ -265,9 +267,15 @@ end
 -- allow_v1_tokens 有効時は v1.0 のメタデータ・JWKS も取得し、issuer_v1 と v1 の鍵を加える。
 -- v1 側の取得・検証失敗はロード全体の失敗にする（fail-close。「v2 は通るが v1 は TTL まで
 -- 失敗し続ける」という部分成功の曖昧な状態を作らない。v1/v2 は同一ホストなので障害は相関する）。
+-- v1.0 / v2.0 の鍵は別々のマップ（keys_v2 / keys_v1）に集める。外部レビュー指摘（High）:
+-- 以前は単一マップにマージしていたため、片方の JWKS にしか存在しない kid でも
+-- 他方のバージョンのトークンを検証できてしまっていた。Microsoft の検証手順
+-- （ver に対応するメタデータ文書で検証する。docs/obo/05）に合わせ、鍵セットを分離して
+-- get_signing_key 側で「トークンの ver に対応する集合からしか選ばない」ようにする。
 -- kong.cache のコールバックとして呼ばれる（キャッシュミス時のみ実行される）
 -- @return { issuer = 検証済み v2.0 issuer, issuer_v1 = 検証済み v1.0 issuer または nil,
---           keys = { kid → JWK JSON 文字列 } }。失敗時は nil, err
+--           keys_v2 = { kid → JWK JSON 文字列 }, keys_v1 = 同上または nil（allow_v1_tokens
+--           無効時）}。失敗時は nil, err
 local function load_metadata(conf)
   -- v2.0 のメタデータ URL（docs/obo/05）。URL 連結は util.build_tenant_url に集約
   local config_url = util.build_tenant_url(conf.identity_base_url, conf.tenant_id,
@@ -303,11 +311,20 @@ local function load_metadata(conf)
   -- （署名鍵の issuer 検証と、v1.0 メタデータ issuer 検証の両方で使う）
   local issuer_tenant = issuer:match("://[^/]+/([^/]+)/v2%.0$")
 
-  local by_kid = {}
-  collect_keys(jwks.keys, issuer, issuer_tenant, by_kid)
+  local keys_v2 = {}
+  collect_keys(jwks.keys, issuer, issuer_tenant, keys_v2)
+  if next(keys_v2) == nil then
+    -- 実 Entra が鍵 0 件の JWKS を配布することはなく、0 件は上流異常（IdP 障害）か、
+    -- 鍵の issuer フィルター（collect_keys）で全滅した設定不整合のいずれかである。
+    -- ここで正常としてキャッシュしてしまうと、空の鍵セットが METADATA_TTL の間
+    -- キャッシュされ続け、その間の全トークンが本来の 502（上流異常）ではなく
+    -- 401（トークン不正）として扱われてしまうため、ロード失敗として fail-close する
+    return nil, "no usable keys in JWKS"
+  end
 
   -- ---- v1.0 メタデータ（allow_v1_tokens 有効時のみ）----
   local issuer_v1
+  local keys_v1
   if conf.allow_v1_tokens then
     -- v1.0 の OpenID configuration は /v2.0 を含まないパス
     -- （docs/obo/05: v1.0 トークンは v1.0 メタデータで検証する）
@@ -339,11 +356,17 @@ local function load_metadata(conf)
     if type(v1_jwks.keys) ~= "table" then
       return nil, "keys missing in v1.0 JWKS"
     end
-    -- v1.0 の鍵をマージする（既存 kid = v2.0 側を優先。collect_keys のコメント参照）
-    collect_keys(v1_jwks.keys, issuer_v1, issuer_tenant, by_kid)
+    -- v1.0 の鍵は v2.0 とは別のマップに集める（フォールバックしないため。collect_keys のコメント参照）
+    keys_v1 = {}
+    collect_keys(v1_jwks.keys, issuer_v1, issuer_tenant, keys_v1)
+    if next(keys_v1) == nil then
+      -- v2.0 側と同じ理由（上記コメント参照）で fail-close する。ここで空のまま通してしまうと
+      -- 「空の v1.0 JWKS からは v1.0 トークンを絶対に受理できない」という保証が崩れる
+      return nil, "no usable keys in v1.0 JWKS"
+    end
   end
 
-  return { issuer = issuer, issuer_v1 = issuer_v1, keys = by_kid }
+  return { issuer = issuer, issuer_v1 = issuer_v1, keys_v2 = keys_v2, keys_v1 = keys_v1 }
 end
 
 -- テナントごとの JWKS キャッシュキーを作るローカル関数。
@@ -376,6 +399,10 @@ end
 -- kid に対応する署名鍵と検証済み issuer を返すローカル関数
 -- 見つからない場合は 1 回だけ再取得を試み、取得に成功したときのみキャッシュを置換する
 -- （鍵ロールオーバー対応。取得失敗時は既存の stale キャッシュを温存する。Issue #3）
+-- @param use_v1_keys truthy なら v1.0 鍵セット（meta.keys_v1）から、falsy なら v2.0 鍵セット
+--        （meta.keys_v2）から kid を引く。呼び出し元（M.validate）がトークンの ver から決める。
+--        もう一方の集合へのフォールバックは行わない（Microsoft の検証手順どおり、
+--        ver に対応するメタデータ文書の鍵だけで検証する。docs/obo/05。外部レビュー指摘 High）
 -- @return { jwk_json = JWK の JSON 文字列, issuer = 検証済み v2.0 メタデータ issuer,
 --           issuer_v1 = 検証済み v1.0 メタデータ issuer（allow_v1_tokens 無効時は nil）}。
 --         失敗時は nil, err, is_upstream_error。
@@ -383,7 +410,7 @@ end
 --   「Entra ID（OpenID configuration / JWKS）に接続できない、または応答が不正な形」であることを示す。
 --   設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のマッピングで
 --   「受信 JWT の検証失敗 → 401」と「Entra ID への接続失敗 / 5xx → 502」を区別するために使う。
-local function get_signing_key(conf, kid)
+local function get_signing_key(conf, kid, use_v1_keys)
   local cache_key = jwks_cache_key(conf)
 
   local meta, err = get_cached_metadata(conf, cache_key)
@@ -392,8 +419,9 @@ local function get_signing_key(conf, kid)
     -- 設定とメタデータの不整合。いずれも受信トークン自体の不正ではない
     return nil, err, true
   end
-  if meta.keys[kid] then
-    return { jwk_json = meta.keys[kid], issuer = meta.issuer, issuer_v1 = meta.issuer_v1 }
+  local key_set = use_v1_keys and meta.keys_v1 or meta.keys_v2
+  if key_set and key_set[kid] then
+    return { jwk_json = key_set[kid], issuer = meta.issuer, issuer_v1 = meta.issuer_v1 }
   end
 
   -- 未知 kid での再取得はワーカー単位で頻度制限する。
@@ -447,8 +475,9 @@ local function get_signing_key(conf, kid)
     return nil, "openid-configuration issuer does not match configured issuer", true
   end
 
-  if fresh.keys[kid] then
-    return { jwk_json = fresh.keys[kid], issuer = fresh.issuer, issuer_v1 = fresh.issuer_v1 }
+  local fresh_key_set = use_v1_keys and fresh.keys_v1 or fresh.keys_v2
+  if fresh_key_set and fresh_key_set[kid] then
+    return { jwk_json = fresh_key_set[kid], issuer = fresh.issuer, issuer_v1 = fresh.issuer_v1 }
   end
   -- IdP には正常に接続できたが、この kid の鍵が存在しない
   -- （鍵ロールオーバーに追従できていない、不正な kid、または issuer 不一致で除外された鍵）
@@ -478,7 +507,15 @@ function M.validate(conf, token)
     return nil, "kid missing in JWT header"
   end
 
-  local key, key_err, key_upstream = get_signing_key(conf, jwt.header.kid)
+  -- ver に対応する鍵セットを選ぶ。ver はこの時点ではまだ署名検証前の未検証値だが、
+  -- 「鍵セットの選択」に使うのは安全である — 偽の ver で別セットを選んでも、署名がその
+  -- セットの鍵で検証できなければ拒否されるだけであり、逆に検証できてしまった場合は
+  -- （＝そのセットの正当な鍵で署名されたトークンだった場合は）署名済みペイロード内の
+  -- ver として後段の iss 分岐でも同じ値が使われるため、攻撃者が ver 詐称によって
+  -- 得られるものは何もない
+  local use_v1_keys = (jwt.payload.ver == "1.0" and conf.allow_v1_tokens == true)
+
+  local key, key_err, key_upstream = get_signing_key(conf, jwt.header.kid, use_v1_keys)
   if not key then
     return nil, key_err, key_upstream
   end

@@ -510,15 +510,17 @@ describe("obo: jwt_validator (unit)", function()
   -- Entra の JWKS は鍵エントリに issuer フィールドを含むことがある（実 JWKS で確認済み。
   -- 多くは "{tenantid}" プレースホルダ入り、一部は具体的な GUID）。存在する場合は
   -- プレースホルダを実テナントに置換した上でメタデータの issuer と一致しない鍵を使わない。
-  it("JWKS の鍵に issuer があり不一致なら、その鍵を署名検証に使わない（401 のまま）", function()
+  it("JWKS の鍵に issuer があり不一致なら、その鍵を署名検証に使わない（結果として鍵 0 件で upstream エラー）", function()
     local jwk = keys.jwk()
     jwk.issuer = "https://evil.example/{tenantid}/v2.0"
     http_responses[JWKS_URL].body = cjson.encode({ keys = { jwk } })
     local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
-    -- IdP には正常接続できており、この鍵が使えないだけなので 401（upstream ではない）
-    assert.is_falsy(is_upstream_error)
+    -- この JWKS はこの 1 件しか鍵を持たず、その唯一の鍵が issuer 不一致で除外されるため、
+    -- 利用可能な鍵が結果的に 0 件になる。「鍵 issuer フィルターで全滅した設定不整合」
+    -- そのものであり、JWKS 鍵 0 件の fail-close ルールにより upstream エラー（502 経路）になる
+    assert.is_truthy(is_upstream_error)
   end)
 
   it("JWKS の鍵の issuer の {tenantid} プレースホルダを実テナントに置換して一致すれば受理する", function()
@@ -537,6 +539,32 @@ describe("obo: jwt_validator (unit)", function()
     local claims, err = jwt_validator.validate(conf, make())
     assert.is_nil(err)
     assert.is_truthy(claims)
+  end)
+
+  -- 外部レビュー指摘: JWKS の利用可能な鍵が 0 件のまま正常キャッシュしてしまうと、
+  -- 実 Entra ではあり得ないはずの「鍵 0 件」状態が METADATA_TTL の間キャッシュされ続け、
+  -- その間の全トークンが本来の 502（上流異常）ではなく 401（トークン不正）になってしまう。
+  -- ロード全体を失敗させ upstream エラーとして fail-close することを確認する。
+  -- last_refetch（未知 kid 再取得のデバウンス用モジュール state）が他テストの影響を
+  -- 受けないよう、この describe 内でモジュールを再 require してクリーンな状態から始める
+  describe("JWKS 鍵 0 件の fail-close", function()
+    before_each(function()
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    after_each(function()
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    it("v2.0 JWKS の利用可能な鍵が 0 件なら upstream エラー", function()
+      http_responses[JWKS_URL].body = cjson.encode({ keys = {} })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
   end)
 
   -- ドメイン形式の tenant_id（contoso.onmicrosoft.com 等）のサポート。
@@ -1065,6 +1093,80 @@ describe("obo: jwt_validator (unit)", function()
       -- 再 require してクリーンな状態に戻す
       package.loaded["kong.plugins.obo.jwt_validator"] = nil
       jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    -- 外部レビュー指摘（High）: v1/v2 の鍵を単一マップにマージしていたため、
+    -- 一方の JWKS にしか存在しない kid でも他方のバージョンのトークンを検証できてしまっていた
+    -- （Microsoft の検証手順は「ver に対応するメタデータ文書で検証する」こと。docs/obo/05）。
+    -- 鍵セットを v1/v2 で分離し、フォールバックしないことを確認する。
+    describe("鍵セットの分離（v1/v2 でフォールバックしない）", function()
+      before_each(function()
+        -- last_refetch（未知 kid 再取得のデバウンス用モジュール state）が他テストの影響を
+        -- 受けないよう、都度モジュールを再 require してクリーンな状態から始める
+        package.loaded["kong.plugins.obo.jwt_validator"] = nil
+        jwt_validator = require("kong.plugins.obo.jwt_validator")
+
+        -- v1.0 JWKS は v2.0 と同じ鍵材料（秘密鍵は共通）だが kid だけ異なるものを返す。
+        -- 署名はどちらの kid を名乗っても検証が通ってしまう鍵なので、kid の選択（＝
+        -- どちらの JWKS から鍵を引いたか）だけが受理・拒否を決める純粋なテストになる
+        local v1_jwk = keys.jwk()
+        v1_jwk.kid = "v1-key-1"
+        http_responses[V1_JWKS_URL].body = cjson.encode({ keys = { v1_jwk } })
+      end)
+
+      after_each(function()
+        package.loaded["kong.plugins.obo.jwt_validator"] = nil
+        jwt_validator = require("kong.plugins.obo.jwt_validator")
+      end)
+
+      it("v1.0 トークンの署名鍵は v1.0 JWKS からのみ選択される（v2 側の kid にフォールバックしない）", function()
+        -- v2.0 側にしかない kid "test-key-1" を名乗る v1.0 トークンは拒否される
+        local token_wrong_kid = make_v1(nil, { kid = "test-key-1" })
+        local claims1, err1, up1 = jwt_validator.validate(conf, token_wrong_kid)
+        assert.is_nil(claims1)
+        assert.is_string(err1)
+        assert.is_falsy(up1)
+
+        -- v1.0 側の kid "v1-key-1" を名乗る v1.0 トークンは受理される
+        local token_right_kid = make_v1(nil, { kid = "v1-key-1" })
+        local claims2, err2 = jwt_validator.validate(conf, token_right_kid)
+        assert.is_nil(err2)
+        assert.is_truthy(claims2)
+      end)
+
+      it("v2.0 トークンは v1.0 JWKS だけにある kid では検証されない", function()
+        local token = make(nil, { kid = "v1-key-1" })
+        local claims, err, up = jwt_validator.validate(conf, token)
+        assert.is_nil(claims)
+        assert.is_string(err)
+        assert.is_falsy(up)
+      end)
+    end)
+
+    it("v1.0 JWKS の利用可能な鍵が 0 件ならロード全体が upstream エラーになる", function()
+      -- V1_JWKS が空の鍵セットを返すと、v1.0 トークンだけでなく v2.0 トークンの検証も
+      -- upstream エラーになる（load_metadata は v1/v2 を一括でロードするため fail-close する）。
+      -- これにより「空の v1.0 JWKS からは v1.0 トークンを絶対に受理できない」ことを保証する
+      -- （レビュー指摘の再現手順つぶし: 空の v1 JWKS が v1.0 トークンの受理につながらない）
+      http_responses[V1_JWKS_URL].body = cjson.encode({ keys = {} })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 issuer のホストが identity_base_url と異なっていても受理される（実 Entra の sts.windows.net 構成）", function()
+      -- 実 Entra は v1.0 issuer のホストが sts.windows.net でメタデータ取得元と異なる。
+      -- 誤ってホスト一致を要求する回帰を検出する
+      local other_host_issuer = "https://sts.mock-other.example/" .. TENANT .. "/"
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = other_host_issuer,
+        jwks_uri = V1_JWKS_URL,
+      })
+      local token = make_v1({ iss = other_host_issuer })
+      local claims, err = jwt_validator.validate(conf, token)
+      assert.is_nil(err)
+      assert.is_truthy(claims)
     end)
   end)
 
