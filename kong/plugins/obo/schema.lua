@@ -75,7 +75,16 @@ local schema = {
           { audiences = { type = "array", required = true, len_min = 1,
               elements = { type = "string", match = "^%S+$" } } },
 
-          -- OpenID メタデータの issuer に対する任意のピン（追加の防御）。
+          -- v1.0 形式のアクセストークン（iss: https://sts.windows.net/{tid}/、ver: "1.0"）を
+          -- 受理するか。既定 false（v2.0 のみ）。
+          -- 有効化すると v1.0 の OpenID configuration（/v2.0 なしパス）も取得し、
+          -- その検証済み issuer を受信トークン iss の第二の期待値にする。
+          -- まずはアプリ登録の api.requestedAccessTokenVersion を 2 にして v2.0 トークンへ
+          -- 移行するのが推奨で、これはアプリ登録を変更できない環境向けの設定（docs/obo/08 §2.3）
+          { allow_v1_tokens = { type = "boolean", required = true, default = false } },
+
+          -- v2.0 OpenID メタデータの issuer に対する任意のピン（追加の防御）。
+          -- v1.0 メタデータ（allow_v1_tokens）用のピンではない。
           -- 設定時、メタデータの issuer がこの値と完全一致しない場合は拒否する（fail-close）。
           -- 受信トークンの iss は常に「検証済みメタデータの issuer」と照合されるため、
           -- この値で iss の期待値を別の値に差し替えることはできない

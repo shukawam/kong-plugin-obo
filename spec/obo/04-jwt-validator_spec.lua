@@ -16,6 +16,10 @@ local JWKS_URL    = MOCK_BASE .. "/" .. TENANT .. "/discovery/v2.0/keys"
 -- プラグインの検証は「ホスト固定」ではなく「テナント GUID の一致」なのでモックホストで表す
 local MOCK_V1_ISSUER = MOCK_BASE .. "/" .. TENANT .. "/"
 
+-- v1.0 の OpenID configuration とその JWKS の URL（/v2.0 を含まないパス。docs/obo/05）
+local V1_CONFIG_URL = MOCK_BASE .. "/" .. TENANT .. "/.well-known/openid-configuration"
+local V1_JWKS_URL   = MOCK_BASE .. "/" .. TENANT .. "/discovery/keys"
+
 describe("obo: jwt_validator (unit)", function()
   local jwt_validator, jwt, keys
   local conf
@@ -77,6 +81,18 @@ describe("obo: jwt_validator (unit)", function()
       claims_override.iss = MOCK_ISSUER
     end
     return jwt.make(claims_override, header_override)
+  end
+
+  -- v1.0 形式（ver = "1.0"、iss 末尾スラッシュ付き）のテストトークンを作るローカル関数
+  local function make_v1(claims_override)
+    claims_override = claims_override or {}
+    if claims_override.ver == nil then
+      claims_override.ver = "1.0"
+    end
+    if claims_override.iss == nil then
+      claims_override.iss = MOCK_V1_ISSUER
+    end
+    return jwt.make(claims_override)
   end
 
   before_each(function()
@@ -925,6 +941,143 @@ describe("obo: jwt_validator (unit)", function()
       assert.is_nil(err)
       assert.is_truthy(claimsB)
       assert.equal("test-user", claimsB.sub)
+    end)
+  end)
+
+  describe("v1.0 トークン（allow_v1_tokens = true）", function()
+    before_each(function()
+      conf.allow_v1_tokens = true
+      -- v1.0 のメタデータと JWKS のモック。issuer は {scheme}://{host}/{GUID}/（末尾スラッシュ）
+      http_responses[V1_CONFIG_URL] = {
+        status = 200,
+        body = cjson.encode({ issuer = MOCK_V1_ISSUER, jwks_uri = V1_JWKS_URL }),
+      }
+      http_responses[V1_JWKS_URL] = {
+        status = 200,
+        body = cjson.encode({ keys = { keys.jwk() } }),
+      }
+    end)
+
+    it("v1.0 トークンを受理してクレームを返す", function()
+      local claims, err = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(err)
+      assert.equal("test-user", claims.sub)
+    end)
+
+    it("v2.0 トークンも引き続き受理する（混在運用）", function()
+      local claims, err = jwt_validator.validate(conf, make())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+    end)
+
+    it("v1.0 トークンでも aud は audiences と照合される", function()
+      assert.is_nil(jwt_validator.validate(conf, make_v1({ aud = "someone-else" })))
+    end)
+
+    it("v1.0 トークンの iss が v1.0 メタデータの issuer と一致しなければ拒否する", function()
+      local token = make_v1({ iss = MOCK_BASE .. "/22222222-2222-2222-2222-222222222222/" })
+      assert.is_nil(jwt_validator.validate(conf, token))
+    end)
+
+    it("v1.0 メタデータの issuer のテナント GUID が v2.0 と異なる場合は upstream エラー", function()
+      -- Entra の署名鍵は全テナント共通のため、テナント GUID の一致が v1 issuer 検証の要
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = MOCK_BASE .. "/22222222-2222-2222-2222-222222222222/",
+        jwks_uri = V1_JWKS_URL,
+      })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 メタデータの issuer が末尾スラッシュなしの形式なら upstream エラー", function()
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = MOCK_BASE .. "/" .. TENANT,  -- 末尾スラッシュ欠落 = v1.0 の正規形でない
+        jwks_uri = V1_JWKS_URL,
+      })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 メタデータの取得に失敗するとロード全体が失敗する（fail-close）", function()
+      -- 部分成功（v2 だけ有効）を作らない: v2.0 トークンの検証も upstream エラーになる
+      http_responses[V1_CONFIG_URL] = nil
+      local claims, err, is_upstream = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 JWKS の jwks_uri が別ホストなら upstream エラー", function()
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = MOCK_V1_ISSUER,
+        jwks_uri = "https://evil.example/" .. TENANT .. "/discovery/keys",
+      })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+  end)
+
+  -- キャッシュキーがフラグ有無で分離されること。共有されると、フラグなし設定が先に
+  -- 温めたエントリ（issuer_v1 なし）をフラグあり設定が引いてしまい、v1.0 トークンが
+  -- TTL 満了まで失敗し続ける（設計書 §5.2）
+  describe("allow_v1_tokens とキャッシュキーの分離", function()
+    local original_cache
+
+    before_each(function()
+      -- ステートフルな kong.cache モック（issuer ピンの describe と同じパターン）
+      original_cache = _G.kong.cache
+      local store = {}
+      _G.kong.cache = {
+        get = function(_, cache_key, _, cb, ...)
+          if store[cache_key] == nil then
+            local value, cb_err = cb(...)
+            if value == nil then
+              return nil, cb_err
+            end
+            store[cache_key] = value
+          end
+          return store[cache_key]
+        end,
+        invalidate = function(_, cache_key)
+          store[cache_key] = nil
+        end,
+      }
+      -- v1 系のモック応答も登録しておく
+      http_responses[V1_CONFIG_URL] = {
+        status = 200,
+        body = cjson.encode({ issuer = MOCK_V1_ISSUER, jwks_uri = V1_JWKS_URL }),
+      }
+      http_responses[V1_JWKS_URL] = {
+        status = 200,
+        body = cjson.encode({ keys = { keys.jwk() } }),
+      }
+    end)
+
+    after_each(function()
+      _G.kong.cache = original_cache
+    end)
+
+    it("フラグなし設定が温めたキャッシュを、フラグあり設定は共有しない", function()
+      -- (a) allow_v1_tokens なしの設定で温める（v2 のみのエントリができる）
+      assert.is_truthy(jwt_validator.validate(conf, make()))
+      local calls_after_warmup = http_call_count
+
+      -- (b) フラグありの設定は別キーで自分のエントリをロードする（HTTP 取得が増える）ため、
+      --     v1.0 トークンが正しく受理される
+      local v1conf = {}
+      for k, v in pairs(conf) do v1conf[k] = v end
+      v1conf.allow_v1_tokens = true
+
+      local claims, err = jwt_validator.validate(v1conf, make_v1())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.is_true(http_call_count > calls_after_warmup)
     end)
   end)
 end)

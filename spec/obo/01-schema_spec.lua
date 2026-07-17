@@ -40,6 +40,7 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.equal(30, conf.cache_ttl_margin)
     assert.equal(10000, conf.http_timeout)
     assert.is_true(conf.ssl_verify)
+    assert.is_false(conf.allow_v1_tokens)
   end)
 
   it("tenant_id がないと拒否する", function()
