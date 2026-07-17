@@ -28,4 +28,5 @@ services:
           client_secret: ${{ env "DECK_CLIENT_SECRET" }}
           scopes:
             - ${{ env "DECK_SCOPE" }}
-          audience: ${{ env "DECK_AUDIENCE" }}
+          audiences:
+            - ${{ env "DECK_AUDIENCE" }}

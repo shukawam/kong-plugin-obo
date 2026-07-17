@@ -107,7 +107,7 @@ export KONG_PLUGINS=bundled,obo
     --data config.client_id=22222222-2222-2222-2222-222222222222 \
     --data config.client_secret=<シークレット> \
     --data config.scopes[]=api://33333333-3333-3333-3333-333333333333/.default \
-    --data config.audience=22222222-2222-2222-2222-222222222222
+    --data config.audiences[]=22222222-2222-2222-2222-222222222222
   ```
 
 ### 3.5 コンテナでの起動（Konnect データプレーン）
@@ -141,7 +141,8 @@ export KONG_PLUGINS=bundled,obo
 | `private_key` | string | 条件付き必須※2 | - | `client_auth_method = private_key_jwt` のときの署名用秘密鍵（PEM 形式）。Vault 参照可能、Kong EE では暗号化保存される。 |
 | `certificate_thumbprint` | string | 条件付き必須※2 | - | 証明書 DER の SHA-256 サムプリントを Base64url エンコードした値（`x5t#S256`。SHA-1 の `x5t` ではない）。client assertion のヘッダーに使用。 |
 | `scopes` | array of string | 必須（最低 1 件） | - | 交換後トークンに要求するダウンストリーム API のスコープ。スペース区切りで `scope` パラメータに連結される。 |
-| `audience` | string | 必須 | - | 受信トークンの `aud` クレームの期待値（通常は `client_id` と同じ値）。 |
+| `audiences` | array of string | 必須（最低 1 件） | - | 受信トークンの `aud` クレームの期待値のリスト。いずれか 1 つと完全一致すれば受理。v2.0 トークンでは素の `client_id`、v1.0 トークンでは `api://{client_id}`（App ID URI）形式になることが多い。通常は `client_id` と同じ値を 1 件指定する。 |
+| `allow_v1_tokens` | boolean | 省略可 | `false` | v1.0 形式のアクセストークン（`iss` が `https://sts.windows.net/{tid}/`、`ver` が `1.0`）も受理するか。有効時は v1.0 の OpenID メタデータも取得し、その検証済み issuer と `iss` を照合する。**まずはアプリ登録の `api.requestedAccessTokenVersion` を `2` にして v2.0 トークンへ移行することを推奨**。これはアプリ登録を変更できない環境向けの設定。 |
 | `issuer` | string | 任意 | - | OpenID メタデータの `issuer` に対するピン（追加の防御）。設定時、メタデータの `issuer` がこの値と完全一致しない場合はリクエストを拒否する。受信トークンの `iss` クレームは常に**検証済みメタデータの `issuer`** と完全一致を要求されるため、この値で `iss` の期待値を別の値に差し替えることはできない。 |
 | `required_scopes` | array of string | 任意 | - | 受信トークンの `scp`（委任スコープ）クレームに含まれていなければならないスコープのリスト。設定すると、指定した全スコープを持たないトークンを `403`（`insufficient_scope`）で拒否する。`scp` はユーザートークンにのみ含まれるため、これを設定すると `scp` を持たない app-only / daemon トークンも拒否される。**未設定なら `scp` の検査は行わない**（下記の注記を参照）。 |
 | `required_roles` | array of string | 任意 | - | 受信トークンの `roles`（アプリロール）クレームに含まれていなければならないロールのリスト。設定すると、指定した全ロールを持たないトークンを `403` で拒否する。未設定なら検査しない。`roles` は app-only トークンにもユーザーの割当ロールにも現れるため、これのみ設定した場合も**非空の `scp` クレームの存在**を併せて要求し、`scp` を持たない app-only / ID トークンは `403` で拒否する（`scp` の値の照合はしない。OBO はユーザー委任トークン専用のため）。要素は app role の「Value」（空白を含められない）を指定する。 |
@@ -214,7 +215,8 @@ services:
           client_secret: "{vault://env/OBO_CLIENT_SECRET}"
           scopes:
             - api://33333333-3333-3333-3333-333333333333/.default
-          audience: 22222222-2222-2222-2222-222222222222
+          audiences:
+            - 22222222-2222-2222-2222-222222222222
 ```
 
 ### 5.2 private_key_jwt 方式
@@ -245,7 +247,8 @@ services:
           scopes:
             - User.Read
             - Mail.Read
-          audience: 22222222-2222-2222-2222-222222222222
+          audiences:
+            - 22222222-2222-2222-2222-222222222222
 ```
 
 ## 6. エラー
