@@ -412,8 +412,18 @@ function M.validate(conf, token)
   end
 
   -- aud: 自分（middle-tier アプリ）宛てのトークンだけを受け入れる。
-  -- 他アプリ宛てのトークンは OBO で引き換えできないため、ここで拒否する（docs/obo/02）
-  if claims.aud ~= conf.audience then
+  -- 他アプリ宛てのトークンは OBO で引き換えできないため、ここで拒否する（docs/obo/02）。
+  -- aud の形式はトークンバージョンで異なり得る（v2.0 は素の client_id、v1.0 は
+  -- api://{client_id} が典型。docs/obo/05）ため、conf.audiences（複数）の
+  -- いずれか 1 つとの完全一致とする
+  local aud_ok = false
+  for _, expected_aud in ipairs(conf.audiences) do
+    if claims.aud == expected_aud then
+      aud_ok = true
+      break
+    end
+  end
+  if not aud_ok then
     return nil, "audience mismatch"
   end
 

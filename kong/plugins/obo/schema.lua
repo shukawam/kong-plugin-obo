@@ -66,8 +66,14 @@ local schema = {
           { scopes = { type = "array", required = true,
               elements = { type = "string" }, len_min = 1 } },
 
-          -- 受信トークンの aud クレームの期待値（= このアプリの client_id など）
-          { audience = { type = "string", required = true } },
+          -- 受信トークンの aud クレームの期待値のリスト。いずれか 1 つと完全一致すれば受理。
+          -- 複数許容にする理由: aud の形式はトークンバージョンで異なり得る
+          -- （v2.0 は素の client_id、v1.0 は api://{client_id} の App ID URI が典型。docs/obo/05）。
+          -- v1.0 / v2.0 のクライアントが混在する移行期に両形式を並べられるようにする。
+          -- len_min = 1: 明示的な空配列（aud 検証が絶対に通らない設定ミス）を拒否する。
+          -- match = "^%S+$": aud に空白は入らないため、空白入り要素は設定ミスとして弾く
+          { audiences = { type = "array", required = true, len_min = 1,
+              elements = { type = "string", match = "^%S+$" } } },
 
           -- OpenID メタデータの issuer に対する任意のピン（追加の防御）。
           -- 設定時、メタデータの issuer がこの値と完全一致しない場合は拒否する（fail-close）。

@@ -80,7 +80,7 @@ describe("obo: jwt_validator (unit)", function()
     conf = {
       identity_base_url = MOCK_BASE,
       tenant_id = TENANT,
-      audience = "test-client-id",
+      audiences = { "test-client-id" },
       http_timeout = 1000,
       ssl_verify = false,
       -- issuer（ピン）は未設定。メタデータの issuer が唯一の期待値になる
@@ -250,6 +250,19 @@ describe("obo: jwt_validator (unit)", function()
     local token = make({ aud = "https://graph.microsoft.com" })
     local claims = jwt_validator.validate(conf, token)
     assert.is_nil(claims)
+  end)
+
+  it("audiences のいずれかに一致する aud を受理する", function()
+    -- v1.0（api://{client_id}）と v2.0（素の client_id）の混在を想定した複数許容
+    conf.audiences = { "api://test-client-id", "test-client-id" }
+    local claims, err = jwt_validator.validate(conf, make())  -- 既定の aud = "test-client-id"
+    assert.is_nil(err)
+    assert.is_truthy(claims)
+  end)
+
+  it("audiences のどれにも一致しない aud を拒否する", function()
+    conf.audiences = { "api://test-client-id", "other-api" }
+    assert.is_nil(jwt_validator.validate(conf, make()))
   end)
 
   it("iss がメタデータの issuer と一致しないトークンを拒否する", function()

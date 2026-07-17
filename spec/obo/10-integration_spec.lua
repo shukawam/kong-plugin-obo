@@ -59,7 +59,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           client_id = "test-client-id",
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
-          audience = "test-client-id",
+          audiences = { "test-client-id" },
           -- issuer（ピン）は未設定: メタデータの issuer が唯一の期待値になる
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
@@ -79,7 +79,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           private_key = keys.private_pem,               -- テスト用 RSA 秘密鍵（署名に使う）
           certificate_thumbprint = "test-thumbprint",   -- x5t#S256 に入るダミー値
           scopes = { "api://downstream/.default" },
-          audience = "test-client-id",
+          audiences = { "test-client-id" },
           -- issuer（ピン）は未設定: メタデータの issuer が唯一の期待値になる
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
@@ -96,7 +96,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           client_id = "test-client-id",
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
-          audience = "test-client-id",
+          audiences = { "test-client-id" },
           identity_base_url = "http://127.0.0.1:10998",  -- モック IdP とは別の閉じたポート
           ssl_verify = false,
         },
@@ -112,7 +112,7 @@ for _, strategy in helpers.all_strategies() do if strategy ~= "cassandra" then
           client_id = "test-client-id",
           client_secret = "test-secret",
           scopes = { "api://downstream/.default" },
-          audience = "test-client-id",
+          audiences = { "test-client-id" },
           -- issuer（ピン）は未設定: メタデータの issuer が唯一の期待値になる
           identity_base_url = MOCK_IDP,
           ssl_verify = false,
