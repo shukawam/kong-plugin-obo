@@ -121,7 +121,8 @@ export KONG_PLUGINS=bundled,obo
 1. [ガイド 01: カスタムプラグイン登録](./docs/01-custom-plugin-registration.md)
 2. [ガイド 02: Data Plane のビルドと起動](./docs/02-data-plane-build.md)
 3. [ガイド 03: Entra ID のセットアップ](./docs/03-entra-id-setup.md)
-4. [ガイド 04: OBO トークン交換の確認](./docs/04-obo-verification.md)
+4. [ガイド 04: OBO トークン交換の確認（v2.0 トークン・標準構成）](./docs/04-obo-verification-v2.md)
+   - v1.0 形式のトークンで検証する場合（`allow_v1_tokens`）: [ガイド 04-v1](./docs/04-obo-verification-v1.md)
 
 切り分けには `compose.yaml` の `KONG_LOG_LEVEL: debug`（設定済み）のログを
 `docker compose logs kong | grep "obo:"` で確認してください。
