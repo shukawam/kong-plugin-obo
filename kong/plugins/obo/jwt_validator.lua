@@ -373,9 +373,13 @@ end
 -- allow_v1_tokens をキーに含める理由: 同一テナントを指すフラグ有無の別設定（別ルート等）が
 -- エントリを共有すると、v1 情報（issuer_v1 / v1 鍵）を持たないエントリをフラグあり設定が
 -- 引いてしまい、v1.0 トークンが TTL 満了まで失敗し続けるため（設計書 §5.2）
+-- ssl_verify をキーに含める理由: ssl_verify=false の設定が取得・キャッシュした鍵を
+-- ssl_verify=true の設定が再利用すると、TLS 検証なしで取得された鍵が検証ありの
+-- 信頼境界へ越境してしまうため、キーを分離する（外部レビュー指摘）
 local function jwks_cache_key(conf)
   return "obo:jwks:" .. conf.identity_base_url .. ":" .. conf.tenant_id
       .. ":v1=" .. tostring(conf.allow_v1_tokens == true)
+      .. ":sv=" .. tostring(conf.ssl_verify == true)
 end
 
 -- キャッシュ経由でメタデータを取得し、conf.issuer（ピン）を毎回照合するローカル関数。

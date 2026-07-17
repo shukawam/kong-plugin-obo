@@ -1170,10 +1170,12 @@ describe("obo: jwt_validator (unit)", function()
     end)
   end)
 
-  -- キャッシュキーがフラグ有無で分離されること。共有されると、フラグなし設定が先に
-  -- 温めたエントリ（issuer_v1 なし）をフラグあり設定が引いてしまい、v1.0 トークンが
-  -- TTL 満了まで失敗し続ける（設計書 §5.2）
-  describe("allow_v1_tokens とキャッシュキーの分離", function()
+  -- キャッシュキーが設定差分（allow_v1_tokens / ssl_verify）で分離されること。
+  -- allow_v1_tokens: 共有されると、フラグなし設定が先に温めたエントリ（issuer_v1 なし）を
+  -- フラグあり設定が引いてしまい、v1.0 トークンが TTL 満了まで失敗し続ける（設計書 §5.2）。
+  -- ssl_verify: 共有されると、ssl_verify=false の設定が TLS 検証なしで取得・キャッシュした
+  -- 鍵を ssl_verify=true の設定が再利用してしまい、検証ありの信頼境界へ越境する（外部レビュー指摘）
+  describe("設定差分とキャッシュキーの分離", function()
     local original_cache
 
     before_each(function()
@@ -1222,6 +1224,23 @@ describe("obo: jwt_validator (unit)", function()
       v1conf.allow_v1_tokens = true
 
       local claims, err = jwt_validator.validate(v1conf, make_v1())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.is_true(http_call_count > calls_after_warmup)
+    end)
+
+    it("ssl_verify=false の設定が温めたキャッシュを ssl_verify=true の設定は共有しない", function()
+      -- (a) ssl_verify=false（このスペックの既定 conf）で温める
+      assert.is_truthy(jwt_validator.validate(conf, make()))
+      local calls_after_warmup = http_call_count
+
+      -- (b) ssl_verify だけを true に変えた設定は別キーで自分のエントリをロードする
+      --     （HTTP 取得が増える）ため、TLS 検証なしで取得された鍵を再利用しない
+      local strict_conf = {}
+      for k, v in pairs(conf) do strict_conf[k] = v end
+      strict_conf.ssl_verify = true
+
+      local claims, err = jwt_validator.validate(strict_conf, make())
       assert.is_nil(err)
       assert.is_truthy(claims)
       assert.is_true(http_call_count > calls_after_warmup)
