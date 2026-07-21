@@ -1,6 +1,6 @@
 local plugin_name = "obo"
 local package_name = "kong-plugin-" .. plugin_name
-local package_version = "0.2.2"
+local package_version = "0.3.0"
 local rockspec_revision = "1"
 
 local github_account_name = "shukawam"
