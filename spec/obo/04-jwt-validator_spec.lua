@@ -12,6 +12,14 @@ local MOCK_ISSUER = MOCK_BASE .. "/" .. TENANT .. "/v2.0"
 local CONFIG_URL  = MOCK_BASE .. "/" .. TENANT .. "/v2.0/.well-known/openid-configuration"
 local JWKS_URL    = MOCK_BASE .. "/" .. TENANT .. "/discovery/v2.0/keys"
 
+-- v1.0 形式の issuer（末尾スラッシュ付き）。実 Entra では https://sts.windows.net/{tid}/ だが、
+-- プラグインの検証は「ホスト固定」ではなく「テナント GUID の一致」なのでモックホストで表す
+local MOCK_V1_ISSUER = MOCK_BASE .. "/" .. TENANT .. "/"
+
+-- v1.0 の OpenID configuration とその JWKS の URL（/v2.0 を含まないパス。docs/obo/05）
+local V1_CONFIG_URL = MOCK_BASE .. "/" .. TENANT .. "/.well-known/openid-configuration"
+local V1_JWKS_URL   = MOCK_BASE .. "/" .. TENANT .. "/discovery/keys"
+
 describe("obo: jwt_validator (unit)", function()
   local jwt_validator, jwt, keys
   local conf
@@ -75,12 +83,25 @@ describe("obo: jwt_validator (unit)", function()
     return jwt.make(claims_override, header_override)
   end
 
+  -- v1.0 形式（ver = "1.0"、iss 末尾スラッシュ付き）のテストトークンを作るローカル関数
+  -- header_override は make() と同じく、kid 差し替え等の異常系・鍵ロールオーバーのテスト用
+  local function make_v1(claims_override, header_override)
+    claims_override = claims_override or {}
+    if claims_override.ver == nil then
+      claims_override.ver = "1.0"
+    end
+    if claims_override.iss == nil then
+      claims_override.iss = MOCK_V1_ISSUER
+    end
+    return jwt.make(claims_override, header_override)
+  end
+
   before_each(function()
     http_call_count = 0
     conf = {
       identity_base_url = MOCK_BASE,
       tenant_id = TENANT,
-      audience = "test-client-id",
+      audiences = { "test-client-id" },
       http_timeout = 1000,
       ssl_verify = false,
       -- issuer（ピン）は未設定。メタデータの issuer が唯一の期待値になる
@@ -252,8 +273,42 @@ describe("obo: jwt_validator (unit)", function()
     assert.is_nil(claims)
   end)
 
+  it("audiences のいずれかに一致する aud を受理する", function()
+    -- v1.0（api://{client_id}）と v2.0（素の client_id）の混在を想定した複数許容
+    conf.audiences = { "api://test-client-id", "test-client-id" }
+    local claims, err = jwt_validator.validate(conf, make())  -- 既定の aud = "test-client-id"
+    assert.is_nil(err)
+    assert.is_truthy(claims)
+  end)
+
+  it("audiences のどれにも一致しない aud を拒否する", function()
+    conf.audiences = { "api://test-client-id", "other-api" }
+    assert.is_nil(jwt_validator.validate(conf, make()))
+  end)
+
   it("iss がメタデータの issuer と一致しないトークンを拒否する", function()
     local token = make({ iss = "https://evil.example/" .. TENANT .. "/v2.0" })
+    assert.is_nil(jwt_validator.validate(conf, token))
+  end)
+
+  it("allow_v1_tokens 未設定では v1.0 トークンを拒否し、診断ヒントを返す", function()
+    -- ver = "1.0" のトークンは既定では受け付けない。エラー理由（debug ログ専用）に
+    -- 恒久対処（requestedAccessTokenVersion=2）へのヒントを含めることで、
+    -- 「issuer mismatch」だけでは原因に気づけない問題（設計書 §10 の教訓）を解消する
+    local token = make({ ver = "1.0", iss = MOCK_V1_ISSUER })
+    local claims, err = jwt_validator.validate(conf, token)
+    assert.is_nil(claims)
+    assert.is_truthy(err:find("requestedAccessTokenVersion", 1, true))
+  end)
+
+  it("ver クレームが欠落したトークンを拒否する", function()
+    -- Entra のアクセストークンは必ず ver を含む。欠落は Entra 由来でないか異常なトークン
+    local token = make({ ver = false })
+    assert.is_nil(jwt_validator.validate(conf, token))
+  end)
+
+  it("未知の ver（1.0 / 2.0 以外）のトークンを拒否する", function()
+    local token = make({ ver = "3.0" })
     assert.is_nil(jwt_validator.validate(conf, token))
   end)
 
@@ -455,15 +510,17 @@ describe("obo: jwt_validator (unit)", function()
   -- Entra の JWKS は鍵エントリに issuer フィールドを含むことがある（実 JWKS で確認済み。
   -- 多くは "{tenantid}" プレースホルダ入り、一部は具体的な GUID）。存在する場合は
   -- プレースホルダを実テナントに置換した上でメタデータの issuer と一致しない鍵を使わない。
-  it("JWKS の鍵に issuer があり不一致なら、その鍵を署名検証に使わない（401 のまま）", function()
+  it("JWKS の鍵に issuer があり不一致なら、その鍵を署名検証に使わない（結果として鍵 0 件で upstream エラー）", function()
     local jwk = keys.jwk()
     jwk.issuer = "https://evil.example/{tenantid}/v2.0"
     http_responses[JWKS_URL].body = cjson.encode({ keys = { jwk } })
     local claims, err, is_upstream_error = jwt_validator.validate(conf, make())
     assert.is_nil(claims)
     assert.is_string(err)
-    -- IdP には正常接続できており、この鍵が使えないだけなので 401（upstream ではない）
-    assert.is_falsy(is_upstream_error)
+    -- この JWKS はこの 1 件しか鍵を持たず、その唯一の鍵が issuer 不一致で除外されるため、
+    -- 利用可能な鍵が結果的に 0 件になる。「鍵 issuer フィルターで全滅した設定不整合」
+    -- そのものであり、JWKS 鍵 0 件の fail-close ルールにより upstream エラー（502 経路）になる
+    assert.is_truthy(is_upstream_error)
   end)
 
   it("JWKS の鍵の issuer の {tenantid} プレースホルダを実テナントに置換して一致すれば受理する", function()
@@ -482,6 +539,32 @@ describe("obo: jwt_validator (unit)", function()
     local claims, err = jwt_validator.validate(conf, make())
     assert.is_nil(err)
     assert.is_truthy(claims)
+  end)
+
+  -- 外部レビュー指摘: JWKS の利用可能な鍵が 0 件のまま正常キャッシュしてしまうと、
+  -- 実 Entra ではあり得ないはずの「鍵 0 件」状態が METADATA_TTL の間キャッシュされ続け、
+  -- その間の全トークンが本来の 502（上流異常）ではなく 401（トークン不正）になってしまう。
+  -- ロード全体を失敗させ upstream エラーとして fail-close することを確認する。
+  -- last_refetch（未知 kid 再取得のデバウンス用モジュール state）が他テストの影響を
+  -- 受けないよう、この describe 内でモジュールを再 require してクリーンな状態から始める
+  describe("JWKS 鍵 0 件の fail-close", function()
+    before_each(function()
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    after_each(function()
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    it("v2.0 JWKS の利用可能な鍵が 0 件なら upstream エラー", function()
+      http_responses[JWKS_URL].body = cjson.encode({ keys = {} })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
   end)
 
   -- ドメイン形式の tenant_id（contoso.onmicrosoft.com 等）のサポート。
@@ -875,6 +958,7 @@ describe("obo: jwt_validator (unit)", function()
       local claims = {
         iss = MOCK_ISSUER,
         aud = "test-client-id", sub = "test-user", exp = now + 3600, nbf = now,
+        ver = "2.0",
       }
       local signing_input = util.b64url_encode(cjson.encode(header))
           .. "." .. util.b64url_encode(cjson.encode(claims))
@@ -886,6 +970,280 @@ describe("obo: jwt_validator (unit)", function()
       assert.is_nil(err)
       assert.is_truthy(claimsB)
       assert.equal("test-user", claimsB.sub)
+    end)
+  end)
+
+  describe("v1.0 トークン（allow_v1_tokens = true）", function()
+    before_each(function()
+      conf.allow_v1_tokens = true
+      -- v1.0 のメタデータと JWKS のモック。issuer は {scheme}://{host}/{GUID}/（末尾スラッシュ）
+      http_responses[V1_CONFIG_URL] = {
+        status = 200,
+        body = cjson.encode({ issuer = MOCK_V1_ISSUER, jwks_uri = V1_JWKS_URL }),
+      }
+      http_responses[V1_JWKS_URL] = {
+        status = 200,
+        body = cjson.encode({ keys = { keys.jwk() } }),
+      }
+    end)
+
+    it("v1.0 トークンを受理してクレームを返す", function()
+      local claims, err = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(err)
+      assert.equal("test-user", claims.sub)
+    end)
+
+    it("v2.0 トークンも引き続き受理する（混在運用）", function()
+      local claims, err = jwt_validator.validate(conf, make())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+    end)
+
+    it("v1.0 トークンでも aud は audiences と照合される", function()
+      assert.is_nil(jwt_validator.validate(conf, make_v1({ aud = "someone-else" })))
+    end)
+
+    it("v1.0 トークンの iss が v1.0 メタデータの issuer と一致しなければ拒否する", function()
+      local token = make_v1({ iss = MOCK_BASE .. "/22222222-2222-2222-2222-222222222222/" })
+      assert.is_nil(jwt_validator.validate(conf, token))
+    end)
+
+    it("v1.0 メタデータの issuer のテナント GUID が v2.0 と異なる場合は upstream エラー", function()
+      -- Entra の署名鍵は全テナント共通のため、テナント GUID の一致が v1 issuer 検証の要
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = MOCK_BASE .. "/22222222-2222-2222-2222-222222222222/",
+        jwks_uri = V1_JWKS_URL,
+      })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 メタデータの issuer が末尾スラッシュなしの形式なら upstream エラー", function()
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = MOCK_BASE .. "/" .. TENANT,  -- 末尾スラッシュ欠落 = v1.0 の正規形でない
+        jwks_uri = V1_JWKS_URL,
+      })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 メタデータの取得に失敗するとロード全体が失敗する（fail-close）", function()
+      -- 部分成功（v2 だけ有効）を作らない: v2.0 トークンの検証も upstream エラーになる
+      http_responses[V1_CONFIG_URL] = nil
+      local claims, err, is_upstream = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 JWKS の jwks_uri が別ホストなら upstream エラー", function()
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = MOCK_V1_ISSUER,
+        jwks_uri = "https://evil.example/" .. TENANT .. "/discovery/keys",
+      })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make_v1())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("鍵ロールオーバー後に新しい kid で届いた v1.0 トークンも issuer_v1 が伝搬して受理される（renew 経路の回帰ガード）", function()
+      -- get_signing_key は未知 kid を検出すると kong.cache:renew でメタデータを再取得し、
+      -- その結果（issuer_v1 を含む）をそのまま返す（jwt_validator.lua の get_signing_key
+      -- 末尾、fresh_key_set[kid] が見つかったときの return 文）。この renew 経路で issuer_v1 の
+      -- 伝搬が抜け落ちる回帰が起きると、鍵ロールオーバー直後に届いた v1.0 トークンだけが
+      -- 「issuer mismatch」で 401 になる（v2.0 トークンや、ロールオーバー後にキャッシュが
+      -- 温まった後の v1.0 トークンでは再現しない、renew 経路特有の回帰のため見逃しやすい）。
+      --
+      -- last_refetch（未知 kid 再取得のデバウンス用）はモジュールローカルな state なので、
+      -- 他テストで進んだ状態を持ち越さないよう、ここでモジュールを再 require して
+      -- クリーンな状態から始める（674 行目付近の既存ロールオーバーテストと同じ作法）
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+
+      -- ロールオーバーを模す: v1.0 JWKS エンドポイントは 1 回目（kong.cache:get 経由の
+      -- 通常取得）に旧鍵のみ、2 回目（未知 kid 検出後の kong.cache:renew 経由の再取得）で
+      -- 新 kid を含む JWKS を返す。新鍵はテスト鍵の公開鍵を流用し kid だけ変える
+      -- （署名はテスト秘密鍵で有効なまま。727 行目付近の v2.0 ロールオーバーテストと同じ手法）
+      local new_kid = "test-key-2"
+      local rotated_jwk = keys.jwk()
+      rotated_jwk.kid = new_kid
+
+      local v1_jwks_seq = 0
+      http_responses[V1_JWKS_URL] = function()
+        v1_jwks_seq = v1_jwks_seq + 1
+        if v1_jwks_seq == 1 then
+          return { status = 200, body = cjson.encode({ keys = { keys.jwk() } }) }
+        end
+        return { status = 200, body = cjson.encode({ keys = { keys.jwk(), rotated_jwk } }) }
+      end
+
+      local token = make_v1(nil, { kid = new_kid })
+      local claims, err = jwt_validator.validate(conf, token)
+
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.equal("test-user", claims.sub)
+
+      -- 後続テストへモジュール state（last_refetch 等）を持ち越さないよう、ここでも
+      -- 再 require してクリーンな状態に戻す
+      package.loaded["kong.plugins.obo.jwt_validator"] = nil
+      jwt_validator = require("kong.plugins.obo.jwt_validator")
+    end)
+
+    -- 外部レビュー指摘（High）: v1/v2 の鍵を単一マップにマージしていたため、
+    -- 一方の JWKS にしか存在しない kid でも他方のバージョンのトークンを検証できてしまっていた
+    -- （Microsoft の検証手順は「ver に対応するメタデータ文書で検証する」こと。docs/obo/05）。
+    -- 鍵セットを v1/v2 で分離し、フォールバックしないことを確認する。
+    describe("鍵セットの分離（v1/v2 でフォールバックしない）", function()
+      before_each(function()
+        -- last_refetch（未知 kid 再取得のデバウンス用モジュール state）が他テストの影響を
+        -- 受けないよう、都度モジュールを再 require してクリーンな状態から始める
+        package.loaded["kong.plugins.obo.jwt_validator"] = nil
+        jwt_validator = require("kong.plugins.obo.jwt_validator")
+
+        -- v1.0 JWKS は v2.0 と同じ鍵材料（秘密鍵は共通）だが kid だけ異なるものを返す。
+        -- 署名はどちらの kid を名乗っても検証が通ってしまう鍵なので、kid の選択（＝
+        -- どちらの JWKS から鍵を引いたか）だけが受理・拒否を決める純粋なテストになる
+        local v1_jwk = keys.jwk()
+        v1_jwk.kid = "v1-key-1"
+        http_responses[V1_JWKS_URL].body = cjson.encode({ keys = { v1_jwk } })
+      end)
+
+      after_each(function()
+        package.loaded["kong.plugins.obo.jwt_validator"] = nil
+        jwt_validator = require("kong.plugins.obo.jwt_validator")
+      end)
+
+      it("v1.0 トークンの署名鍵は v1.0 JWKS からのみ選択される（v2 側の kid にフォールバックしない）", function()
+        -- v2.0 側にしかない kid "test-key-1" を名乗る v1.0 トークンは拒否される
+        local token_wrong_kid = make_v1(nil, { kid = "test-key-1" })
+        local claims1, err1, up1 = jwt_validator.validate(conf, token_wrong_kid)
+        assert.is_nil(claims1)
+        assert.is_string(err1)
+        assert.is_falsy(up1)
+
+        -- v1.0 側の kid "v1-key-1" を名乗る v1.0 トークンは受理される
+        local token_right_kid = make_v1(nil, { kid = "v1-key-1" })
+        local claims2, err2 = jwt_validator.validate(conf, token_right_kid)
+        assert.is_nil(err2)
+        assert.is_truthy(claims2)
+      end)
+
+      it("v2.0 トークンは v1.0 JWKS だけにある kid では検証されない", function()
+        local token = make(nil, { kid = "v1-key-1" })
+        local claims, err, up = jwt_validator.validate(conf, token)
+        assert.is_nil(claims)
+        assert.is_string(err)
+        assert.is_falsy(up)
+      end)
+    end)
+
+    it("v1.0 JWKS の利用可能な鍵が 0 件ならロード全体が upstream エラーになる", function()
+      -- V1_JWKS が空の鍵セットを返すと、v1.0 トークンだけでなく v2.0 トークンの検証も
+      -- upstream エラーになる（load_metadata は v1/v2 を一括でロードするため fail-close する）。
+      -- これにより「空の v1.0 JWKS からは v1.0 トークンを絶対に受理できない」ことを保証する
+      -- （レビュー指摘の再現手順つぶし: 空の v1 JWKS が v1.0 トークンの受理につながらない）
+      http_responses[V1_JWKS_URL].body = cjson.encode({ keys = {} })
+      local claims, err, is_upstream = jwt_validator.validate(conf, make())
+      assert.is_nil(claims)
+      assert.is_string(err)
+      assert.is_truthy(is_upstream)
+    end)
+
+    it("v1.0 issuer のホストが identity_base_url と異なっていても受理される（実 Entra の sts.windows.net 構成）", function()
+      -- 実 Entra は v1.0 issuer のホストが sts.windows.net でメタデータ取得元と異なる。
+      -- 誤ってホスト一致を要求する回帰を検出する
+      local other_host_issuer = "https://sts.mock-other.example/" .. TENANT .. "/"
+      http_responses[V1_CONFIG_URL].body = cjson.encode({
+        issuer = other_host_issuer,
+        jwks_uri = V1_JWKS_URL,
+      })
+      local token = make_v1({ iss = other_host_issuer })
+      local claims, err = jwt_validator.validate(conf, token)
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+    end)
+  end)
+
+  -- キャッシュキーが設定差分（allow_v1_tokens / ssl_verify）で分離されること。
+  -- allow_v1_tokens: 共有されると、フラグなし設定が先に温めたエントリ（issuer_v1 なし）を
+  -- フラグあり設定が引いてしまい、v1.0 トークンが TTL 満了まで失敗し続ける（設計書 §5.2）。
+  -- ssl_verify: 共有されると、ssl_verify=false の設定が TLS 検証なしで取得・キャッシュした
+  -- 鍵を ssl_verify=true の設定が再利用してしまい、検証ありの信頼境界へ越境する（外部レビュー指摘）
+  describe("設定差分とキャッシュキーの分離", function()
+    local original_cache
+
+    before_each(function()
+      -- ステートフルな kong.cache モック（issuer ピンの describe と同じパターン）
+      original_cache = _G.kong.cache
+      local store = {}
+      _G.kong.cache = {
+        get = function(_, cache_key, _, cb, ...)
+          if store[cache_key] == nil then
+            local value, cb_err = cb(...)
+            if value == nil then
+              return nil, cb_err
+            end
+            store[cache_key] = value
+          end
+          return store[cache_key]
+        end,
+        invalidate = function(_, cache_key)
+          store[cache_key] = nil
+        end,
+      }
+      -- v1 系のモック応答も登録しておく
+      http_responses[V1_CONFIG_URL] = {
+        status = 200,
+        body = cjson.encode({ issuer = MOCK_V1_ISSUER, jwks_uri = V1_JWKS_URL }),
+      }
+      http_responses[V1_JWKS_URL] = {
+        status = 200,
+        body = cjson.encode({ keys = { keys.jwk() } }),
+      }
+    end)
+
+    after_each(function()
+      _G.kong.cache = original_cache
+    end)
+
+    it("フラグなし設定が温めたキャッシュを、フラグあり設定は共有しない", function()
+      -- (a) allow_v1_tokens なしの設定で温める（v2 のみのエントリができる）
+      assert.is_truthy(jwt_validator.validate(conf, make()))
+      local calls_after_warmup = http_call_count
+
+      -- (b) フラグありの設定は別キーで自分のエントリをロードする（HTTP 取得が増える）ため、
+      --     v1.0 トークンが正しく受理される
+      local v1conf = {}
+      for k, v in pairs(conf) do v1conf[k] = v end
+      v1conf.allow_v1_tokens = true
+
+      local claims, err = jwt_validator.validate(v1conf, make_v1())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.is_true(http_call_count > calls_after_warmup)
+    end)
+
+    it("ssl_verify=false の設定が温めたキャッシュを ssl_verify=true の設定は共有しない", function()
+      -- (a) ssl_verify=false（このスペックの既定 conf）で温める
+      assert.is_truthy(jwt_validator.validate(conf, make()))
+      local calls_after_warmup = http_call_count
+
+      -- (b) ssl_verify だけを true に変えた設定は別キーで自分のエントリをロードする
+      --     （HTTP 取得が増える）ため、TLS 検証なしで取得された鍵を再利用しない
+      local strict_conf = {}
+      for k, v in pairs(conf) do strict_conf[k] = v end
+      strict_conf.ssl_verify = true
+
+      local claims, err = jwt_validator.validate(strict_conf, make())
+      assert.is_nil(err)
+      assert.is_truthy(claims)
+      assert.is_true(http_call_count > calls_after_warmup)
     end)
   end)
 end)

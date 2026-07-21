@@ -66,10 +66,25 @@ local schema = {
           { scopes = { type = "array", required = true,
               elements = { type = "string" }, len_min = 1 } },
 
-          -- 受信トークンの aud クレームの期待値（= このアプリの client_id など）
-          { audience = { type = "string", required = true } },
+          -- 受信トークンの aud クレームの期待値のリスト。いずれか 1 つと完全一致すれば受理。
+          -- 複数許容にする理由: aud の形式はトークンバージョンで異なり得る
+          -- （v2.0 は素の client_id、v1.0 は api://{client_id} の App ID URI が典型。docs/obo/05）。
+          -- v1.0 / v2.0 のクライアントが混在する移行期に両形式を並べられるようにする。
+          -- len_min = 1: 明示的な空配列（aud 検証が絶対に通らない設定ミス）を拒否する。
+          -- match = "^%S+$": aud に空白は入らないため、空白入り要素は設定ミスとして弾く
+          { audiences = { type = "array", required = true, len_min = 1,
+              elements = { type = "string", match = "^%S+$" } } },
 
-          -- OpenID メタデータの issuer に対する任意のピン（追加の防御）。
+          -- v1.0 形式のアクセストークン（iss: https://sts.windows.net/{tid}/、ver: "1.0"）を
+          -- 受理するか。既定 false（v2.0 のみ）。
+          -- 有効化すると v1.0 の OpenID configuration（/v2.0 なしパス）も取得し、
+          -- その検証済み issuer を受信トークン iss の第二の期待値にする。
+          -- まずはアプリ登録の api.requestedAccessTokenVersion を 2 にして v2.0 トークンへ
+          -- 移行するのが推奨で、これはアプリ登録を変更できない環境向けの設定（docs/obo/08 §2.3）
+          { allow_v1_tokens = { type = "boolean", required = true, default = false } },
+
+          -- v2.0 OpenID メタデータの issuer に対する任意のピン（追加の防御）。
+          -- v1.0 メタデータ（allow_v1_tokens）用のピンではない。
           -- 設定時、メタデータの issuer がこの値と完全一致しない場合は拒否する（fail-close）。
           -- 受信トークンの iss は常に「検証済みメタデータの issuer」と照合されるため、
           -- この値で iss の期待値を別の値に差し替えることはできない

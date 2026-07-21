@@ -107,7 +107,7 @@ export KONG_PLUGINS=bundled,obo
     --data config.client_id=22222222-2222-2222-2222-222222222222 \
     --data config.client_secret=<シークレット> \
     --data config.scopes[]=api://33333333-3333-3333-3333-333333333333/.default \
-    --data config.audience=22222222-2222-2222-2222-222222222222
+    --data config.audiences[]=22222222-2222-2222-2222-222222222222
   ```
 
 ### 3.5 コンテナでの起動（Konnect データプレーン）
@@ -121,7 +121,8 @@ export KONG_PLUGINS=bundled,obo
 1. [ガイド 01: カスタムプラグイン登録](./docs/01-custom-plugin-registration.md)
 2. [ガイド 02: Data Plane のビルドと起動](./docs/02-data-plane-build.md)
 3. [ガイド 03: Entra ID のセットアップ](./docs/03-entra-id-setup.md)
-4. [ガイド 04: OBO トークン交換の確認](./docs/04-obo-verification.md)
+4. [ガイド 04: OBO トークン交換の確認（v2.0 トークン・標準構成）](./docs/04-obo-verification-v2.md)
+   - v1.0 形式のトークンで検証する場合（`allow_v1_tokens`）: [ガイド 04-v1](./docs/04-obo-verification-v1.md)
 
 切り分けには `compose.yaml` の `KONG_LOG_LEVEL: debug`（設定済み）のログを
 `docker compose logs kong | grep "obo:"` で確認してください。
@@ -141,8 +142,9 @@ export KONG_PLUGINS=bundled,obo
 | `private_key` | string | 条件付き必須※2 | - | `client_auth_method = private_key_jwt` のときの署名用秘密鍵（PEM 形式）。Vault 参照可能、Kong EE では暗号化保存される。 |
 | `certificate_thumbprint` | string | 条件付き必須※2 | - | 証明書 DER の SHA-256 サムプリントを Base64url エンコードした値（`x5t#S256`。SHA-1 の `x5t` ではない）。client assertion のヘッダーに使用。 |
 | `scopes` | array of string | 必須（最低 1 件） | - | 交換後トークンに要求するダウンストリーム API のスコープ。スペース区切りで `scope` パラメータに連結される。 |
-| `audience` | string | 必須 | - | 受信トークンの `aud` クレームの期待値（通常は `client_id` と同じ値）。 |
-| `issuer` | string | 任意 | - | OpenID メタデータの `issuer` に対するピン（追加の防御）。設定時、メタデータの `issuer` がこの値と完全一致しない場合はリクエストを拒否する。受信トークンの `iss` クレームは常に**検証済みメタデータの `issuer`** と完全一致を要求されるため、この値で `iss` の期待値を別の値に差し替えることはできない。 |
+| `audiences` | array of string | 必須（最低 1 件） | - | 受信トークンの `aud` クレームの期待値のリスト。いずれか 1 つと完全一致すれば受理。v2.0 トークンでは素の `client_id`、v1.0 トークンでは `api://{client_id}`（App ID URI）形式になることが多い。通常は `client_id` と同じ値を 1 件指定する。 |
+| `allow_v1_tokens` | boolean | 省略可 | `false` | v1.0 形式のアクセストークン（`iss` が `https://sts.windows.net/{tid}/`、`ver` が `1.0`）も受理するか。有効時は v1.0 の OpenID メタデータも取得し、その検証済み issuer と `iss` を照合する。**まずはアプリ登録の `api.requestedAccessTokenVersion` を `2` にして v2.0 トークンへ移行することを推奨**。これはアプリ登録を変更できない環境向けの設定。 |
+| `issuer` | string | 任意 | - | **v2.0** OpenID メタデータの `issuer` に対するピン（追加の防御）。`allow_v1_tokens` 有効時も常に v2.0 メタデータの issuer を指定する（v1.0 の `https://sts.windows.net/...` を設定するとメタデータ検証が失敗し 502 になる）。設定時、メタデータの `issuer` がこの値と完全一致しない場合はリクエストを拒否する。受信トークンの `iss` クレームは常に**検証済みメタデータの `issuer`** と完全一致を要求されるため、この値で `iss` の期待値を別の値に差し替えることはできない。 |
 | `required_scopes` | array of string | 任意 | - | 受信トークンの `scp`（委任スコープ）クレームに含まれていなければならないスコープのリスト。設定すると、指定した全スコープを持たないトークンを `403`（`insufficient_scope`）で拒否する。`scp` はユーザートークンにのみ含まれるため、これを設定すると `scp` を持たない app-only / daemon トークンも拒否される。**未設定なら `scp` の検査は行わない**（下記の注記を参照）。 |
 | `required_roles` | array of string | 任意 | - | 受信トークンの `roles`（アプリロール）クレームに含まれていなければならないロールのリスト。設定すると、指定した全ロールを持たないトークンを `403` で拒否する。未設定なら検査しない。`roles` は app-only トークンにもユーザーの割当ロールにも現れるため、これのみ設定した場合も**非空の `scp` クレームの存在**を併せて要求し、`scp` を持たない app-only / ID トークンは `403` で拒否する（`scp` の値の照合はしない。OBO はユーザー委任トークン専用のため）。要素は app role の「Value」（空白を含められない）を指定する。 |
 | `identity_base_url` | url | 省略可 | `https://login.microsoftonline.com` | Entra ID のベース URL。通常は変更不要（ソブリンクラウドやテストで使用）。末尾スラッシュは自動で正規化される。**本番では必ず `https://` を指定する**（`http://` はモック IdP を使う統合テスト用）。 |
@@ -214,7 +216,8 @@ services:
           client_secret: "{vault://env/OBO_CLIENT_SECRET}"
           scopes:
             - api://33333333-3333-3333-3333-333333333333/.default
-          audience: 22222222-2222-2222-2222-222222222222
+          audiences:
+            - 22222222-2222-2222-2222-222222222222
 ```
 
 ### 5.2 private_key_jwt 方式
@@ -245,7 +248,8 @@ services:
           scopes:
             - User.Read
             - Mail.Read
-          audience: 22222222-2222-2222-2222-222222222222
+          audiences:
+            - 22222222-2222-2222-2222-222222222222
 ```
 
 ## 6. エラー
@@ -255,7 +259,7 @@ services:
 
 | ステータス | 意味 |
 |---|---|
-| `401 Unauthorized` | `Authorization` ヘッダーがない/`Bearer` 形式でない、受信トークンの検証失敗（署名・`iss`・`aud`・`exp`・`nbf` 不一致）、または Entra ID がトークン交換を拒否した場合。`WWW-Authenticate` ヘッダーに、無害化した OAuth エラーコードと（Entra ID が返した場合）Base64 エンコードされたクレームチャレンジ（`claims`）を付与する。 |
+| `401 Unauthorized` | `Authorization` ヘッダーがない/`Bearer` 形式でない、受信トークンの検証失敗（署名・`iss`・`aud`・`exp`・`nbf`・`ver` 不一致。`allow_v1_tokens` 無効時の v1.0 トークンや `ver` 欠落・未知の値も含む）、または Entra ID がトークン交換を拒否した場合。`WWW-Authenticate` ヘッダーに、無害化した OAuth エラーコードと（Entra ID が返した場合）Base64 エンコードされたクレームチャレンジ（`claims`）を付与する。 |
 | `403 Forbidden` | トークンの**認証**は成功したが、`required_scopes` / `required_roles` で要求した委任スコープ（`scp`）・アプリロール（`roles`）を満たさない場合（権限不足）。`WWW-Authenticate: Bearer error="insufficient_scope"` を付与する（[RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) §3.1）。どのスコープ/ロールが不足したかはレスポンスに含めない。 |
 | `502 Bad Gateway` | Entra ID への到達性・応答に問題がある場合（OpenID configuration/JWKS の取得失敗、トークン交換リクエストでの IdP 側 5xx やネットワークエラーなど）。受信トークン自体の検証結果ではなく IdP 側の障害であることを示す。 |
 | `500 Internal Server Error` | 上記以外の想定外のエラー。 |

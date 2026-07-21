@@ -137,7 +137,8 @@ jobs:
                   client_secret: smoke-secret
                   scopes:
                     - "api://smoke/.default"
-                  audience: smoke-client
+                  audiences:
+                    - smoke-client
         EOF
 
     - name: Kong を dbless（本番 DP と同じ database=off）で起動する

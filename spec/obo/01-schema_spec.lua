@@ -19,7 +19,7 @@ local function base_config()
     client_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     client_secret = "test-secret",
     scopes = { "https://graph.microsoft.com/.default" },
-    audience = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    audiences = { "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
   }
 end
 
@@ -40,6 +40,7 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.equal(30, conf.cache_ttl_margin)
     assert.equal(10000, conf.http_timeout)
     assert.is_true(conf.ssl_verify)
+    assert.is_false(conf.allow_v1_tokens)
   end)
 
   it("tenant_id がないと拒否する", function()
@@ -114,9 +115,36 @@ describe(PLUGIN_NAME .. ": (schema)", function()
     assert.is_truthy(err.config.scopes)
   end)
 
-  it("audience がないと拒否する", function()
+  it("audiences がないと拒否する", function()
     local config = base_config()
-    config.audience = nil
+    config.audiences = nil
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.audiences)
+  end)
+
+  it("audiences が空配列だと拒否する", function()
+    -- 値の入れ忘れで空配列だけが残ると aud 検証が絶対に通らなくなるため、設定時に検出する
+    local config = base_config()
+    config.audiences = {}
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.audiences)
+  end)
+
+  it("audiences の要素に空白が含まれると拒否する", function()
+    -- aud クレームに空白は入らないため、空白入りは絶対に一致しない設定ミスとして弾く
+    local config = base_config()
+    config.audiences = { "api://foo bar" }
+    local ok, err = validate(config)
+    assert.is_falsy(ok)
+    assert.is_truthy(err.config.audiences)
+  end)
+
+  it("旧 audience（単数）は未知のフィールドとして拒否する（0.3.0 の破壊的変更）", function()
+    -- 移行漏れ（audience のまま）を黙って無視せず、設定エラーとして気づけるようにする
+    local config = base_config()
+    config.audience = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     local ok, err = validate(config)
     assert.is_falsy(ok)
     assert.is_truthy(err.config.audience)

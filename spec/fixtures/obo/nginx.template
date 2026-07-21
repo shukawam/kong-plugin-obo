@@ -123,6 +123,22 @@ http {
           }
       }
 
+      # v1.0 の OpenID configuration（/v2.0 なしパス。docs/obo/05「v1.0 トークンは
+      # v1.0 メタデータで検証する」）。issuer は {scheme}://{host}/{GUID}/（末尾スラッシュ付き）。
+      # 実 Entra ではホストが sts.windows.net だが、プラグインの検証は
+      # 「テナント GUID の一致」なのでモックでは同一ホストで返す
+      location ~ ^/([^/]+)/\.well-known/openid-configuration$ {
+          content_by_lua_block {
+              local tenant = ngx.var[1]
+              ngx.header["Content-Type"] = "application/json"
+              ngx.say(string.format(
+                '{"issuer":"http://127.0.0.1:10999/%s/",' ..
+                '"token_endpoint":"http://127.0.0.1:10999/%s/oauth2/token",' ..
+                '"jwks_uri":"http://127.0.0.1:10999/%s/discovery/keys"}',
+                tenant, tenant, tenant))
+          }
+      }
+
       # JWKS: テスト用公開鍵を返す（spec/fixtures/obo/keys.lua と同じ鍵）
       location ~ ^/[^/]+/discovery/v2\.0/keys$ {
           content_by_lua_block {
@@ -131,6 +147,18 @@ http {
               -- 同じ nginx ディレクティブを二重に定義できない（"duplicate" エラーになる）。
               -- そこでこの Lua ブロック内で package.path を拡張し、
               -- コンテナ内でリポジトリがマウントされている /kong-plugin を検索対象に加える。
+              package.path = "/kong-plugin/?.lua;/kong-plugin/?/init.lua;" .. package.path
+              local keys = require "spec.fixtures.obo.keys"
+              ngx.header["Content-Type"] = "application/json"
+              ngx.say(cjson.encode({ keys = { keys.jwk() } }))
+          }
+      }
+
+      # v1.0 の JWKS（/discovery/keys、/v2.0 なし）。鍵は v2.0 と同一（実 Entra も同じ鍵を配布する）
+      location ~ ^/[^/]+/discovery/keys$ {
+          content_by_lua_block {
+              local cjson = require "cjson.safe"
+              -- v2.0 用 JWKS location と同じ理由で package.path をここで拡張する
               package.path = "/kong-plugin/?.lua;/kong-plugin/?/init.lua;" .. package.path
               local keys = require "spec.fixtures.obo.keys"
               ngx.header["Content-Type"] = "application/json"

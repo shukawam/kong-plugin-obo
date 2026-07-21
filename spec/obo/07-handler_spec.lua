@@ -74,7 +74,7 @@ describe("obo: handler (unit)", function()
   before_each(function()
     request_headers, upstream_headers, exited = {}, {}, nil
     debug_logs = {}
-    conf = { audience = "test-client-id" }
+    conf = { audiences = { "test-client-id" } }
     -- 既定のモック挙動: すべて成功
     mock_validate = function() return { sub = "user" } end
     mock_authorize = function() return true end

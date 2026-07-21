@@ -113,6 +113,20 @@ describe("obo: token_cache (unit)", function()
     assert.equal(2, exchange_calls)
   end)
 
+  -- ssl_verify をキー材料に含めないと、ssl_verify=false（TLS 検証なし）の設定で
+  -- 交換・キャッシュされた token B（MITM 下では任意の値になり得る）を、同一テナント・
+  -- client_id・scopes の ssl_verify=true（検証あり）設定が再利用してしまう
+  -- （jwt_validator.lua の JWKS キャッシュキーと同じ方針。外部レビュー指摘）
+  it("ssl_verify が違えば別キャッシュになる（同一トークン・client_id・scopes・テナントでも）", function()
+    conf.ssl_verify = false
+    token_cache.get(conf, "incoming", ok_exchange("t-insecure", 3600))
+    local other_conf = {}
+    for k, v in pairs(conf) do other_conf[k] = v end
+    other_conf.ssl_verify = true
+    token_cache.get(other_conf, "incoming", ok_exchange("t-secure", 3600))
+    assert.equal(2, exchange_calls)
+  end)
+
   it("キャッシュキーに生の受信トークンを含めない（ハッシュ化されている）", function()
     token_cache.get(conf, "super-secret-incoming-token", ok_exchange("t", 3600))
     for key in pairs(cache_store) do

@@ -77,10 +77,15 @@ end
 -- 生のトークンをキーにしない（共有メモリに平文トークンを並べないため）。
 -- client_id と scopes に加えてテナント（tenant_id / identity_base_url）もキーに含め、
 -- 同一トークン・client_id・scopes でもテナントが異なれば別キャッシュになるようにする
--- （テナントをまたいだ交換済みトークンの誤ヒットを防ぐ）
+-- （テナントをまたいだ交換済みトークンの誤ヒットを防ぐ）。
+-- ssl_verify もキーに含める理由: ssl_verify=false（TLS 検証なし）の設定で交換・
+-- キャッシュされた token B（MITM 下では任意の値になり得る）を、同一テナント・
+-- client_id・scopes の ssl_verify=true（検証あり）設定が再利用してしまう越境を防ぐ
+-- （jwt_validator.lua の JWKS キャッシュキーと同じ方針。外部レビュー指摘）
 local function cache_key(conf, incoming_token)
   local material = incoming_token .. "|" .. conf.client_id .. "|" .. table.concat(conf.scopes, " ")
       .. "|" .. tostring(conf.tenant_id) .. "|" .. tostring(conf.identity_base_url)
+      .. "|" .. tostring(conf.ssl_verify == true)
   return "obo:token:" .. sha256_hex(material)
 end
 

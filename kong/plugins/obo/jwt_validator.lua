@@ -190,10 +190,92 @@ local function validate_jwks_uri(conf, jwks_uri)
   return true
 end
 
+-- v1.0 メタデータが自己申告した issuer を検証するローカル関数。
+-- v1.0 の issuer は {scheme}://{host}/{GUID}/（末尾スラッシュ付き）形式で、実 Entra では
+-- ホストが sts.windows.net になる（docs/obo/05）。ホストは identity_base_url と必ず異なるため
+-- 同一 authority は要求せず、代わりに「パスのテナント GUID が検証済み v2.0 issuer の
+-- テナント GUID と完全一致すること」を信頼の要にする（Entra の署名鍵は全テナント共通なので、
+-- テナントの同定こそが issuer 検証の目的である）。
+-- sts.windows.net はハードコードしない（ソブリンクラウド・モック IdP でホストが異なり得る）。
+-- @param conf プラグイン設定
+-- @param issuer v1.0 メタデータの issuer 値
+-- @param tenant_guid 検証済み v2.0 issuer から取り出したテナント GUID
+-- @return 検証済み v1.0 issuer 文字列。問題があれば nil, エラー理由
+local function validate_v1_metadata_issuer(conf, issuer, tenant_guid)
+  if type(issuer) ~= "string" then
+    return nil, "issuer missing in v1.0 openid-configuration"
+  end
+  -- scheme: 原則 HTTPS を要求。identity_base_url が http のとき（統合テストのモック IdP 用）
+  -- のみ http を許容する（validate_jwks_uri と同じ既存ルール）
+  local base_scheme = util.url_scheme_authority(conf.identity_base_url)
+  local iss_scheme = util.url_scheme_authority(issuer)
+  if iss_scheme ~= "https" then
+    if not (base_scheme == "http" and iss_scheme == "http") then
+      return nil, "v1.0 issuer must use https"
+    end
+  end
+  -- 形式: {scheme}://{host}/{GUID}/（末尾スラッシュ付き）であること
+  local tid = issuer:match("^%a[%w+.-]*://[^/]+/([^/]+)/$")
+  if not tid or not util.is_guid(tid) then
+    return nil, "v1.0 issuer is not of the form {scheme}://{host}/{tenant GUID}/"
+  end
+  -- テナント GUID が v2.0 issuer と一致すること（ここが信頼の要）
+  if tid ~= tenant_guid then
+    return nil, "v1.0 issuer tenant does not match v2.0 issuer tenant"
+  end
+  return issuer
+end
+
+-- JWKS の鍵を kid で引けるように by_kid へ取り込むローカル関数。
+-- pkey.new に渡せるよう JWK は JSON 文字列のまま保持する。
+-- 署名鍵の issuer 検証（docs/obo/05 "Validate the signing key issuer"）:
+-- Entra の JWKS は鍵エントリに issuer フィールドを含むことがある（実 JWKS で確認済み。
+-- 多くは "{tenantid}" プレースホルダ入り、一部は具体的なテナント GUID）。
+-- 存在する場合はプレースホルダを実テナントに置換した上で expected_issuer と
+-- 完全一致しない鍵は取り込まない（他 issuer の鍵での署名検証を防ぐ）。
+-- 既に by_kid にある kid は上書きしない（同一 JWKS 内で kid が重複した場合に、後から
+-- 出てきた不正・破損した鍵に差し替わってしまうことを防ぐ保険）。
+-- v1.0 / v2.0 の鍵は呼び出し側（load_metadata）が別々のマップに集めるため、
+-- 「バージョン間で kid が衝突したときにどちらを優先するか」という概念自体がなくなっている
+-- @param jwks_keys JWKS の keys 配列
+-- @param expected_issuer この JWKS の鍵に期待する issuer（検証済みメタデータ issuer）
+-- @param issuer_tenant {tenantid} プレースホルダの置換に使うテナント GUID
+-- @param by_kid 取り込み先テーブル（kid → JWK JSON 文字列）。破壊的に更新される
+local function collect_keys(jwks_keys, expected_issuer, issuer_tenant, by_kid)
+  for _, jwk in ipairs(jwks_keys) do
+    if type(jwk) == "table" and type(jwk.kid) == "string" and by_kid[jwk.kid] == nil then
+      local key_issuer_ok = true
+      if jwk.issuer ~= nil then
+        if type(jwk.issuer) == "string" and issuer_tenant then
+          -- gsub の第 4 引数 1 は「最初の 1 回だけ置換」。{tenantid} は Lua パターンの
+          -- 特殊文字を含まないのでそのまま検索文字列に使える
+          local resolved = jwk.issuer:gsub("{tenantid}", issuer_tenant, 1)
+          key_issuer_ok = (resolved == expected_issuer)
+        else
+          key_issuer_ok = false
+        end
+      end
+      if key_issuer_ok then
+        by_kid[jwk.kid] = cjson.encode(jwk)
+      end
+    end
+  end
+end
+
 -- OpenID 設定 → JWKS の順に取得し、検証済み issuer と kid → JWK(JSON文字列) の
 -- テーブルをまとめて返すローカル関数。
+-- allow_v1_tokens 有効時は v1.0 のメタデータ・JWKS も取得し、issuer_v1 と v1 の鍵を加える。
+-- v1 側の取得・検証失敗はロード全体の失敗にする（fail-close。「v2 は通るが v1 は TTL まで
+-- 失敗し続ける」という部分成功の曖昧な状態を作らない。v1/v2 は同一ホストなので障害は相関する）。
+-- v1.0 / v2.0 の鍵は別々のマップ（keys_v2 / keys_v1）に集める。外部レビュー指摘（High）:
+-- 以前は単一マップにマージしていたため、片方の JWKS にしか存在しない kid でも
+-- 他方のバージョンのトークンを検証できてしまっていた。Microsoft の検証手順
+-- （ver に対応するメタデータ文書で検証する。docs/obo/05）に合わせ、鍵セットを分離して
+-- get_signing_key 側で「トークンの ver に対応する集合からしか選ばない」ようにする。
 -- kong.cache のコールバックとして呼ばれる（キャッシュミス時のみ実行される）
--- @return { issuer = 検証済み issuer, keys = { kid → JWK JSON 文字列 } }。失敗時は nil, err
+-- @return { issuer = 検証済み v2.0 issuer, issuer_v1 = 検証済み v1.0 issuer または nil,
+--           keys_v2 = { kid → JWK JSON 文字列 }, keys_v1 = 同上または nil（allow_v1_tokens
+--           無効時）}。失敗時は nil, err
 local function load_metadata(conf)
   -- v2.0 のメタデータ URL（docs/obo/05）。URL 連結は util.build_tenant_url に集約
   local config_url = util.build_tenant_url(conf.identity_base_url, conf.tenant_id,
@@ -225,40 +307,79 @@ local function load_metadata(conf)
     return nil, "keys missing in JWKS"
   end
 
-  -- issuer のパスからテナント ID（GUID）部分を取り出す（下の署名鍵 issuer 検証で使う）
+  -- issuer のパスからテナント ID（GUID）部分を取り出す
+  -- （署名鍵の issuer 検証と、v1.0 メタデータ issuer 検証の両方で使う）
   local issuer_tenant = issuer:match("://[^/]+/([^/]+)/v2%.0$")
 
-  -- kid で引けるように整形する。pkey.new に渡せるよう JWK は JSON 文字列のまま保持する。
-  -- 署名鍵の issuer 検証（docs/obo/05 "Validate the signing key issuer"）:
-  -- Entra の JWKS は鍵エントリに issuer フィールドを含むことがある（実 JWKS で確認済み。
-  -- 多くは "{tenantid}" プレースホルダ入り、一部は具体的なテナント GUID）。
-  -- 存在する場合はプレースホルダを実テナントに置換した上でメタデータの issuer と
-  -- 完全一致しない鍵は取り込まない（他 issuer の鍵での署名検証を防ぐ）
-  local by_kid = {}
-  for _, jwk in ipairs(jwks.keys) do
-    if type(jwk) == "table" and type(jwk.kid) == "string" then
-      local key_issuer_ok = true
-      if jwk.issuer ~= nil then
-        if type(jwk.issuer) == "string" and issuer_tenant then
-          -- gsub の第 4 引数 1 は「最初の 1 回だけ置換」。{tenantid} は Lua パターンの
-          -- 特殊文字を含まないのでそのまま検索文字列に使える
-          local resolved = jwk.issuer:gsub("{tenantid}", issuer_tenant, 1)
-          key_issuer_ok = (resolved == issuer)
-        else
-          key_issuer_ok = false
-        end
-      end
-      if key_issuer_ok then
-        by_kid[jwk.kid] = cjson.encode(jwk)
-      end
+  local keys_v2 = {}
+  collect_keys(jwks.keys, issuer, issuer_tenant, keys_v2)
+  if next(keys_v2) == nil then
+    -- 実 Entra が鍵 0 件の JWKS を配布することはなく、0 件は上流異常（IdP 障害）か、
+    -- 鍵の issuer フィルター（collect_keys）で全滅した設定不整合のいずれかである。
+    -- ここで正常としてキャッシュしてしまうと、空の鍵セットが METADATA_TTL の間
+    -- キャッシュされ続け、その間の全トークンが本来の 502（上流異常）ではなく
+    -- 401（トークン不正）として扱われてしまうため、ロード失敗として fail-close する
+    return nil, "no usable keys in JWKS"
+  end
+
+  -- ---- v1.0 メタデータ（allow_v1_tokens 有効時のみ）----
+  local issuer_v1
+  local keys_v1
+  if conf.allow_v1_tokens == true then
+    -- v1.0 の OpenID configuration は /v2.0 を含まないパス
+    -- （docs/obo/05: v1.0 トークンは v1.0 メタデータで検証する）
+    local v1_config_url = util.build_tenant_url(conf.identity_base_url, conf.tenant_id,
+        ".well-known/openid-configuration")
+    local v1_oidc, v1_err = http_get_json(conf, v1_config_url)
+    if not v1_oidc then
+      return nil, v1_err
+    end
+
+    issuer_v1, v1_err = validate_v1_metadata_issuer(conf, v1_oidc.issuer, issuer_tenant)
+    if not issuer_v1 then
+      return nil, v1_err
+    end
+
+    if type(v1_oidc.jwks_uri) ~= "string" then
+      return nil, "jwks_uri missing in v1.0 openid-configuration"
+    end
+    -- v1.0 の jwks_uri も v2.0 と同じルール（identity_base_url と同一 authority）で検証する
+    local v1_ok_uri, v1_uri_err = validate_jwks_uri(conf, v1_oidc.jwks_uri)
+    if not v1_ok_uri then
+      return nil, v1_uri_err
+    end
+
+    local v1_jwks, v1_jwks_err = http_get_json(conf, v1_oidc.jwks_uri)
+    if not v1_jwks then
+      return nil, v1_jwks_err
+    end
+    if type(v1_jwks.keys) ~= "table" then
+      return nil, "keys missing in v1.0 JWKS"
+    end
+    -- v1.0 の鍵は v2.0 とは別のマップに集める（フォールバックしないため。collect_keys のコメント参照）
+    keys_v1 = {}
+    collect_keys(v1_jwks.keys, issuer_v1, issuer_tenant, keys_v1)
+    if next(keys_v1) == nil then
+      -- v2.0 側と同じ理由（上記コメント参照）で fail-close する。ここで空のまま通してしまうと
+      -- 「空の v1.0 JWKS からは v1.0 トークンを絶対に受理できない」という保証が崩れる
+      return nil, "no usable keys in v1.0 JWKS"
     end
   end
-  return { issuer = issuer, keys = by_kid }
+
+  return { issuer = issuer, issuer_v1 = issuer_v1, keys_v2 = keys_v2, keys_v1 = keys_v1 }
 end
 
--- テナントごとの JWKS キャッシュキーを作るローカル関数
+-- テナントごとの JWKS キャッシュキーを作るローカル関数。
+-- allow_v1_tokens をキーに含める理由: 同一テナントを指すフラグ有無の別設定（別ルート等）が
+-- エントリを共有すると、v1 情報（issuer_v1 / v1 鍵）を持たないエントリをフラグあり設定が
+-- 引いてしまい、v1.0 トークンが TTL 満了まで失敗し続けるため（設計書 §5.2）
+-- ssl_verify をキーに含める理由: ssl_verify=false の設定が取得・キャッシュした鍵を
+-- ssl_verify=true の設定が再利用すると、TLS 検証なしで取得された鍵が検証ありの
+-- 信頼境界へ越境してしまうため、キーを分離する（外部レビュー指摘）
 local function jwks_cache_key(conf)
   return "obo:jwks:" .. conf.identity_base_url .. ":" .. conf.tenant_id
+      .. ":v1=" .. tostring(conf.allow_v1_tokens == true)
+      .. ":sv=" .. tostring(conf.ssl_verify == true)
 end
 
 -- キャッシュ経由でメタデータを取得し、conf.issuer（ピン）を毎回照合するローカル関数。
@@ -266,7 +387,8 @@ end
 -- 指す別のプラグイン設定（別ルート等）とキャッシュエントリが共有されるため、
 -- ロード時（キャッシュミス時）の照合だけではキャッシュヒット経路でピンが迂回されてしまう。
 -- 正の防御としてここで毎回照合する（文字列比較 1 回なのでコストは無視できる）。
--- @return メタデータテーブル { issuer, keys }。失敗時は nil, err
+-- @return メタデータテーブル { issuer, issuer_v1, keys_v2, keys_v1 }。
+--         issuer_v1 / keys_v1 は allow_v1_tokens 無効時は nil。失敗時は nil, err
 local function get_cached_metadata(conf, cache_key)
   local meta, err = kong.cache:get(cache_key, { ttl = METADATA_TTL }, load_metadata, conf)
   if not meta then
@@ -281,13 +403,18 @@ end
 -- kid に対応する署名鍵と検証済み issuer を返すローカル関数
 -- 見つからない場合は 1 回だけ再取得を試み、取得に成功したときのみキャッシュを置換する
 -- （鍵ロールオーバー対応。取得失敗時は既存の stale キャッシュを温存する。Issue #3）
--- @return { jwk_json = JWK の JSON 文字列, issuer = 検証済みメタデータ issuer }。
+-- @param use_v1_keys truthy なら v1.0 鍵セット（meta.keys_v1）から、falsy なら v2.0 鍵セット
+--        （meta.keys_v2）から kid を引く。呼び出し元（M.validate）がトークンの ver から決める。
+--        もう一方の集合へのフォールバックは行わない（Microsoft の検証手順どおり、
+--        ver に対応するメタデータ文書の鍵だけで検証する。docs/obo/05。外部レビュー指摘 High）
+-- @return { jwk_json = JWK の JSON 文字列, issuer = 検証済み v2.0 メタデータ issuer,
+--           issuer_v1 = 検証済み v1.0 メタデータ issuer（allow_v1_tokens 無効時は nil）}。
 --         失敗時は nil, err, is_upstream_error。
 --   is_upstream_error が true の場合、失敗理由は「受信トークンが不正」ではなく
 --   「Entra ID（OpenID configuration / JWKS）に接続できない、または応答が不正な形」であることを示す。
 --   設計書（docs/superpowers/specs/2026-07-10-obo-plugin-design.md §5）のマッピングで
 --   「受信 JWT の検証失敗 → 401」と「Entra ID への接続失敗 / 5xx → 502」を区別するために使う。
-local function get_signing_key(conf, kid)
+local function get_signing_key(conf, kid, use_v1_keys)
   local cache_key = jwks_cache_key(conf)
 
   local meta, err = get_cached_metadata(conf, cache_key)
@@ -296,8 +423,9 @@ local function get_signing_key(conf, kid)
     -- 設定とメタデータの不整合。いずれも受信トークン自体の不正ではない
     return nil, err, true
   end
-  if meta.keys[kid] then
-    return { jwk_json = meta.keys[kid], issuer = meta.issuer }
+  local key_set = use_v1_keys and meta.keys_v1 or meta.keys_v2
+  if key_set and key_set[kid] then
+    return { jwk_json = key_set[kid], issuer = meta.issuer, issuer_v1 = meta.issuer_v1 }
   end
 
   -- 未知 kid での再取得はワーカー単位で頻度制限する。
@@ -351,8 +479,9 @@ local function get_signing_key(conf, kid)
     return nil, "openid-configuration issuer does not match configured issuer", true
   end
 
-  if fresh.keys[kid] then
-    return { jwk_json = fresh.keys[kid], issuer = fresh.issuer }
+  local fresh_key_set = use_v1_keys and fresh.keys_v1 or fresh.keys_v2
+  if fresh_key_set and fresh_key_set[kid] then
+    return { jwk_json = fresh_key_set[kid], issuer = fresh.issuer, issuer_v1 = fresh.issuer_v1 }
   end
   -- IdP には正常に接続できたが、この kid の鍵が存在しない
   -- （鍵ロールオーバーに追従できていない、不正な kid、または issuer 不一致で除外された鍵）
@@ -382,7 +511,15 @@ function M.validate(conf, token)
     return nil, "kid missing in JWT header"
   end
 
-  local key, key_err, key_upstream = get_signing_key(conf, jwt.header.kid)
+  -- ver に対応する鍵セットを選ぶ。ver はこの時点ではまだ署名検証前の未検証値だが、
+  -- 「鍵セットの選択」に使うのは安全である — 偽の ver で別セットを選んでも、署名がその
+  -- セットの鍵で検証できなければ拒否されるだけであり、逆に検証できてしまった場合は
+  -- （＝そのセットの正当な鍵で署名されたトークンだった場合は）署名済みペイロード内の
+  -- ver として後段の iss 分岐でも同じ値が使われるため、攻撃者が ver 詐称によって
+  -- 得られるものは何もない
+  local use_v1_keys = (jwt.payload.ver == "1.0" and conf.allow_v1_tokens == true)
+
+  local key, key_err, key_upstream = get_signing_key(conf, jwt.header.kid, use_v1_keys)
   if not key then
     return nil, key_err, key_upstream
   end
@@ -403,17 +540,47 @@ function M.validate(conf, token)
   -- ---- クレーム検証（署名検証が通ってから行う）----
   local claims = jwt.payload
 
-  -- iss: メタデータの issuer と完全一致を要求する（docs/obo/05: OpenID Connect Core の
-  -- 「メタデータの Issuer Identifier と iss クレームの完全一致」）。
-  -- 検証済みメタデータ issuer が唯一の期待値であり、conf.issuer は
-  -- メタデータ issuer のピンとして load_metadata 側で照合済み
-  if claims.iss ~= key.issuer then
+  -- iss: 期待値を ver クレームで分岐する。ver は署名済みペイロード内にあるため、
+  -- 署名検証を通過した後は改ざんの心配なく分岐に使える。
+  -- 期待値はどの分岐でも「検証済みメタデータ由来の issuer」のみ（fail-close モデル。
+  -- conf.issuer は v2.0 メタデータ issuer のピンとして load_metadata 側で照合済み）:
+  --   ver = "2.0" → v2.0 メタデータの issuer（docs/obo/05: OpenID Connect Core の
+  --                 「メタデータの Issuer Identifier と iss クレームの完全一致」）
+  --   ver = "1.0" → allow_v1_tokens 有効時のみ、v1.0 メタデータの issuer
+  --                 （https://sts.windows.net/{tid}/ 形式。docs/obo/05）
+  --   それ以外（欠落・未知の値）→ 拒否（Entra のアクセストークンは必ず ver を含む）
+  local expected_iss
+  if claims.ver == "2.0" then
+    expected_iss = key.issuer
+  elseif claims.ver == "1.0" and conf.allow_v1_tokens == true then
+    -- issuer_v1 は allow_v1_tokens 有効時のメタデータロードで必ず設定される（fail-close。
+    -- 万一 nil でも「iss ~= nil」で必ず不一致になり、受理側に倒れることはない）
+    expected_iss = key.issuer_v1
+  elseif claims.ver == "1.0" then
+    -- 診断ヒント（debug ログ専用。handler がレスポンスに出さないことは既存方針のまま）。
+    -- 恒久対処は middle-tier アプリの api.requestedAccessTokenVersion を 2 にすること
+    -- （docs/obo/08 §2.3）。アプリ登録を変更できない場合のみ allow_v1_tokens を使う
+    return nil, "v1.0 token rejected: set requestedAccessTokenVersion=2 on the app registration (docs/obo/08), or enable allow_v1_tokens"
+  else
+    return nil, "unsupported or missing ver claim"
+  end
+  if claims.iss ~= expected_iss then
     return nil, "issuer mismatch"
   end
 
   -- aud: 自分（middle-tier アプリ）宛てのトークンだけを受け入れる。
-  -- 他アプリ宛てのトークンは OBO で引き換えできないため、ここで拒否する（docs/obo/02）
-  if claims.aud ~= conf.audience then
+  -- 他アプリ宛てのトークンは OBO で引き換えできないため、ここで拒否する（docs/obo/02）。
+  -- aud の形式はトークンバージョンで異なり得る（v2.0 は素の client_id、v1.0 は
+  -- api://{client_id} が典型。docs/obo/05）ため、conf.audiences（複数）の
+  -- いずれか 1 つとの完全一致とする
+  local aud_ok = false
+  for _, expected_aud in ipairs(conf.audiences) do
+    if claims.aud == expected_aud then
+      aud_ok = true
+      break
+    end
+  end
+  if not aud_ok then
     return nil, "audience mismatch"
   end
 
