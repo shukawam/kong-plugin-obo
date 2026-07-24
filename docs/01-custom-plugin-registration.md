@@ -1,5 +1,7 @@
 # ガイド 01: Konnect へのカスタムプラグイン登録
 
+**日本語** | [English](i18n/en/01-custom-plugin-registration.md)
+
 Konnect のハイブリッドモードでは、Control Plane (CP) に obo プラグインの**スキーマ**を登録しないと、CP からプラグイン設定を Data Plane (DP) に配信できません。（DP 側へのプラグイン本体のインストールは [ガイド 02](02-data-plane-build.md) で行います）
 
 ## 前提

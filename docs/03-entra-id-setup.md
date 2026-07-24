@@ -1,5 +1,7 @@
 # ガイド 03: Entra ID のセットアップ
 
+**日本語** | [English](i18n/en/03-entra-id-setup.md)
+
 OBO フローに必要な 3 つのアプリを Microsoft Entra ID に登録します。
 
 | アプリ | 役割 |

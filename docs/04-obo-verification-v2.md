@@ -1,5 +1,7 @@
 # ガイド 04: OBO トークン交換の確認（v2.0 トークン・標準構成）
 
+**日本語** | [English](i18n/en/04-obo-verification-v2.md)
+
 Kong の Route に obo プラグインを設定し、実際にユーザーのトークンをダウンストリーム API 用トークンに交換できることを確認します。
 
 このガイドは標準構成（middle-tier アプリに `requestedAccessTokenVersion: 2` を設定し、v2.0 形式のトークンを受信する。[ガイド 03 §3.2](03-entra-id-setup.md)）向けです。v1.0 形式のトークンが届く環境（`allow_v1_tokens: true`）を検証する場合は [ガイド 04-v1: OBO トークン交換の確認（v1.0 トークン）](04-obo-verification-v1.md) を使ってください。

@@ -1,0 +1,11 @@
+# ドキュメント多言語同期マニフェスト
+# 列: source<TAB>lang<TAB>translation<TAB>source_hash
+# source_hash = その翻訳を作成した時点のマスター(source)の 'git hash-object' 値
+# 更新方法: 翻訳を追従させた後 'scripts/check-doc-sync.sh --update' を実行する
+README.md	en	docs/i18n/en/README.md	15fb179950d829e7ebfe3230f73b467ddb874d1a
+docs/01-custom-plugin-registration.md	en	docs/i18n/en/01-custom-plugin-registration.md	ec7b0aa4ac4b271bcdbdcffbb480453136d0e67f
+docs/02-data-plane-build.md	en	docs/i18n/en/02-data-plane-build.md	2223ceae1471af54693c8c969f97beae75d30159
+docs/03-entra-id-setup.md	en	docs/i18n/en/03-entra-id-setup.md	e77458ec5ca2596dd4c0080fbe6472d41def45ad
+docs/04-obo-verification-v1.md	en	docs/i18n/en/04-obo-verification-v1.md	b0dca6b21ec743dd59f4c4a4ed244e8e057d3cc6
+docs/04-obo-verification-v2.md	en	docs/i18n/en/04-obo-verification-v2.md	adf26bdd5bd4ff67340f67853a19b155bcf097bc
+docs/05-release.md	en	docs/i18n/en/05-release.md	13f1f208ef7f486f51cf0854f9a54c44293f72d8
