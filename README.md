@@ -1,5 +1,7 @@
 # kong-plugin-obo
 
+**日本語** | [English](docs/i18n/en/README.md)
+
 Microsoft Entra ID の [On-Behalf-Of (OBO) フロー](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow)
 を実現する Kong Gateway カスタムプラグインです。
 

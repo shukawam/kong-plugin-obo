@@ -1,5 +1,7 @@
 # ガイド 04-v1: OBO トークン交換の確認（v1.0 トークン）
 
+**日本語** | [English](i18n/en/04-obo-verification-v1.md)
+
 クライアントから **v1.0 形式のアクセストークン**（`ver: "1.0"`、`iss: https://sts.windows.net/{tid}/`）が届く環境を再現し、`allow_v1_tokens: true` を設定した obo プラグインが検証とトークン交換を行えることを確認します。
 
 標準構成（v2.0 トークン）の検証は [ガイド 04: OBO トークン交換の確認（v2.0 トークン・標準構成）](04-obo-verification-v2.md) を使ってください。v1.0 トークンの受理はアプリ登録のマニフェストを変更できない環境向けの構成であり、可能であれば `requestedAccessTokenVersion: 2`（v2.0 への移行）を優先することを推奨します（[ガイド 03 §3.2](03-entra-id-setup.md)）。

@@ -1,0 +1,34 @@
+name: Doc Sync
+
+concurrency:
+  group: ${{ github.workflow }} ${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  pull_request:
+    paths:
+    - README.md
+    - docs/**
+    - scripts/check-doc-sync.sh
+    - .github/workflows/doc-sync.yml
+  push:
+    branches:
+    - main
+    paths:
+    - README.md
+    - docs/**
+    - scripts/check-doc-sync.sh
+    - .github/workflows/doc-sync.yml
+
+jobs:
+  doc-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+    # サプライチェーン攻撃対策としてアクションはコミット SHA で固定する（コメントは対応するバージョン）
+    - name: Checkout
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+    # 日本語（マスター）が変更されたのに翻訳が追従していない状態を検知する
+    - name: Check documentation translations are in sync
+      run: bash scripts/check-doc-sync.sh --check

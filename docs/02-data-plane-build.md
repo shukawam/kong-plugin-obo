@@ -1,5 +1,7 @@
 # ガイド 02: Data Plane のビルドと起動
 
+**日本語** | [English](i18n/en/02-data-plane-build.md)
+
 obo プラグインを組み込んだ Kong Gateway を、Konnect の Data Plane (DP) として Docker Compose で起動します。
 
 ## 前提
